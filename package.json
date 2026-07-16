@@ -1,0 +1,21 @@
+﻿{
+  "name": "x402-seller-starter",
+  "version": "1.0.0",
+  "description": "x402-protected API that sells geocoding + timezone lookups to AI agents for USDC micropayments",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@x402/core": "^2.0.0",
+    "@x402/evm": "^2.0.0",
+    "@x402/express": "^2.0.0",
+    "@x402/extensions": "^2.0.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "geo-tz": "^8.1.1"
+  }
+}
