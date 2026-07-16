@@ -6,6 +6,7 @@ import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { facilitator as cdpFacilitatorConfig } from "@coinbase/x402";
+import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 
 const PORT = process.env.PORT || 4021;
 const PAY_TO = process.env.PAY_TO_ADDRESS;
@@ -46,14 +47,32 @@ app.use(
         description: "Forward geocode a free-text address into latitude, longitude, and IANA timezone.",
         mimeType: "application/json",
         extensions: {
-          bazaar: {
-            discoverable: true,
-            category: "data",
-            tags: ["geocoding", "location", "timezone", "address"],
-            input: {
-              query: { address: "Tokyo, Japan" },
+          ...declareDiscoveryExtension({
+            input: { address: "Tokyo, Japan" },
+            inputSchema: {
+              properties: {
+                address: { type: "string", description: "Address or place name to geocode" },
+              },
+              required: ["address"],
             },
-          },
+            output: {
+              example: {
+                query: "Tokyo, Japan",
+                lat: 35.6762,
+                lng: 139.6503,
+                timezone: "Asia/Tokyo",
+                display_name: "Tokyo, Japan",
+              },
+              schema: {
+                properties: {
+                  lat: { type: "number" },
+                  lng: { type: "number" },
+                  timezone: { type: "string" },
+                  display_name: { type: "string" },
+                },
+              },
+            },
+          }),
         },
       },
       "GET /geo/reverse": {
@@ -68,14 +87,32 @@ app.use(
         description: "Reverse geocode latitude/longitude coordinates into a place name and IANA timezone.",
         mimeType: "application/json",
         extensions: {
-          bazaar: {
-            discoverable: true,
-            category: "data",
-            tags: ["geocoding", "location", "timezone", "coordinates"],
-            input: {
-              query: { lat: "35.6762", lng: "139.6503" },
+          ...declareDiscoveryExtension({
+            input: { lat: "35.6762", lng: "139.6503" },
+            inputSchema: {
+              properties: {
+                lat: { type: "string", description: "Latitude" },
+                lng: { type: "string", description: "Longitude" },
+              },
+              required: ["lat", "lng"],
             },
-          },
+            output: {
+              example: {
+                lat: 35.6762,
+                lng: 139.6503,
+                timezone: "Asia/Tokyo",
+                display_name: "Tokyo, Japan",
+              },
+              schema: {
+                properties: {
+                  lat: { type: "number" },
+                  lng: { type: "number" },
+                  timezone: { type: "string" },
+                  display_name: { type: "string" },
+                },
+              },
+            },
+          }),
         },
       },
     },
