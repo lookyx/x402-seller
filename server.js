@@ -13,9 +13,15 @@ const PAY_TO = process.env.PAY_TO_ADDRESS;
 const NETWORK = process.env.NETWORK || "eip155:84532";
 const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://x402.org/facilitator";
 const USING_CDP = Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET);
+const LOCATIONIQ_API_KEY = process.env.LOCATIONIQ_API_KEY;
 
 if (!PAY_TO) {
   console.error("\n❌ Missing PAY_TO_ADDRESS. Copy .env.example to .env and set your wallet address.\n");
+  process.exit(1);
+}
+
+if (!LOCATIONIQ_API_KEY) {
+  console.error("\n❌ Missing LOCATIONIQ_API_KEY. Sign up free at locationiq.com and add it to .env.\n");
   process.exit(1);
 }
 
@@ -129,6 +135,7 @@ app.get("/", (req, res) => {
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
+    attribution: "Geocoding by LocationIQ.com",
   });
 });
 
@@ -141,9 +148,8 @@ app.get("/geo/lookup", async (req, res) => {
   }
 
   try {
-    const { data } = await axios.get("https://nominatim.openstreetmap.org/search", {
-      params: { q: address, format: "json", limit: 1 },
-      headers: { "User-Agent": "x402-seller-starter/1.0 (contact: you@example.com)" },
+    const { data } = await axios.get("https://us1.locationiq.com/v1/search", {
+      params: { key: LOCATIONIQ_API_KEY, q: address, format: "json", limit: 1 },
     });
 
     if (!data || data.length === 0) {
@@ -161,7 +167,7 @@ app.get("/geo/lookup", async (req, res) => {
       display_name,
     });
   } catch (err) {
-    console.error(err.message);
+    console.error(err.response?.data || err.message);
     res.status(502).json({ error: "Upstream geocoding lookup failed" });
   }
 });
@@ -173,9 +179,8 @@ app.get("/geo/reverse", async (req, res) => {
   }
 
   try {
-    const { data } = await axios.get("https://nominatim.openstreetmap.org/reverse", {
-      params: { lat, lon: lng, format: "json" },
-      headers: { "User-Agent": "x402-seller-starter/1.0 (contact: you@example.com)" },
+    const { data } = await axios.get("https://us1.locationiq.com/v1/reverse", {
+      params: { key: LOCATIONIQ_API_KEY, lat, lon: lng, format: "json" },
     });
 
     const tzMatches = findTimezone(parseFloat(lat), parseFloat(lng));
@@ -187,7 +192,7 @@ app.get("/geo/reverse", async (req, res) => {
       display_name: data?.display_name || null,
     });
   } catch (err) {
-    console.error(err.message);
+    console.error(err.response?.data || err.message);
     res.status(502).json({ error: "Upstream reverse geocoding lookup failed" });
   }
 });
