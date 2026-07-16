@@ -5,14 +5,13 @@ import { find as findTimezone } from "geo-tz";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
+import { facilitator as cdpFacilitatorConfig } from "@coinbase/x402";
 
-// ---------------------------------------------------------------------------
-// CONFIG
-// ---------------------------------------------------------------------------
 const PORT = process.env.PORT || 4021;
 const PAY_TO = process.env.PAY_TO_ADDRESS;
 const NETWORK = process.env.NETWORK || "eip155:84532";
 const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://x402.org/facilitator";
+const USING_CDP = Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET);
 
 if (!PAY_TO) {
   console.error("\n❌ Missing PAY_TO_ADDRESS. Copy .env.example to .env and set your wallet address.\n");
@@ -21,7 +20,9 @@ if (!PAY_TO) {
 
 const app = express();
 
-const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
+const facilitatorClient = USING_CDP
+  ? new HTTPFacilitatorClient(cdpFacilitatorConfig)
+  : new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 
 const resourceServer = new x402ResourceServer(facilitatorClient).register(
   NETWORK,
@@ -70,6 +71,7 @@ app.get("/", (req, res) => {
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
+    facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
   });
 });
 
@@ -136,6 +138,6 @@ app.get("/geo/reverse", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
   console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse`);
-  console.log(`   Network: ${NETWORK}  |  Facilitator: ${FACILITATOR_URL}`);
+  console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });

@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "x402-seller-starter",
   "version": "1.0.0",
   "description": "x402-protected API that sells geocoding + timezone lookups to AI agents for USDC micropayments",
@@ -9,6 +9,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@coinbase/x402": "^2.1.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
     "@x402/express": "^2.0.0",
