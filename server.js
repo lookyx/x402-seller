@@ -213,22 +213,29 @@ app.get("/geo/reverse", async (req, res) => {
 app.get("/oil/price", async (req, res) => {
   const benchmarkParam = (req.query.benchmark || "wti").toLowerCase();
   const seriesMap = {
-    wti: { seriesId: "PET.RWTC.D", label: "WTI" },
-    brent: { seriesId: "PET.RBRTE.D", label: "Brent" },
+    wti: { code: "RWTC", label: "WTI" },
+    brent: { code: "RBRTE", label: "Brent" },
   };
   const chosen = seriesMap[benchmarkParam];
   if (!chosen) return res.status(400).json({ error: "benchmark must be 'wti' or 'brent'" });
 
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/petroleum/pri/spt/data", {
-      params: { api_key: EIA_API_KEY, series_id: chosen.seriesId },
+      params: {
+        api_key: EIA_API_KEY,
+        frequency: "daily",
+        "data[0]": "value",
+        "facets[series][]": chosen.code,
+        "sort[0][column]": "period",
+        "sort[0][direction]": "desc",
+        length: 1,
+      },
     });
 
     const points = data?.response?.data || [];
     if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
 
-    // Sort client-side to guarantee the most recent point, regardless of API ordering
-    const latest = [...points].sort((a, b) => (a.period < b.period ? 1 : -1))[0];
+    const latest = points[0];
 
     res.json({
       benchmark: chosen.label,
