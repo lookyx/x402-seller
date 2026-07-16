@@ -45,6 +45,16 @@ app.use(
         ],
         description: "Forward geocode a free-text address into latitude, longitude, and IANA timezone.",
         mimeType: "application/json",
+        extensions: {
+          bazaar: {
+            discoverable: true,
+            category: "data",
+            tags: ["geocoding", "location", "timezone", "address"],
+            input: {
+              query: { address: "Tokyo, Japan" },
+            },
+          },
+        },
       },
       "GET /geo/reverse": {
         accepts: [
@@ -57,6 +67,16 @@ app.use(
         ],
         description: "Reverse geocode latitude/longitude coordinates into a place name and IANA timezone.",
         mimeType: "application/json",
+        extensions: {
+          bazaar: {
+            discoverable: true,
+            category: "data",
+            tags: ["geocoding", "location", "timezone", "coordinates"],
+            input: {
+              query: { lat: "35.6762", lng: "139.6503" },
+            },
+          },
+        },
       },
     },
     resourceServer
