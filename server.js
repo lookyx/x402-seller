@@ -14,6 +14,7 @@ const NETWORK = process.env.NETWORK || "eip155:84532";
 const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://x402.org/facilitator";
 const USING_CDP = Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET);
 const LOCATIONIQ_API_KEY = process.env.LOCATIONIQ_API_KEY;
+const EIA_API_KEY = process.env.EIA_API_KEY;
 
 if (!PAY_TO) {
   console.error("\n❌ Missing PAY_TO_ADDRESS. Copy .env.example to .env and set your wallet address.\n");
@@ -25,15 +26,17 @@ if (!LOCATIONIQ_API_KEY) {
   process.exit(1);
 }
 
+if (!EIA_API_KEY) {
+  console.error("\n❌ Missing EIA_API_KEY. Register free at eia.gov/opendata/register.php and add it to .env.\n");
+  process.exit(1);
+}
+
 const app = express();
-app.set("trust proxy", 1);
 
 const baseFacilitatorClient = USING_CDP
   ? new HTTPFacilitatorClient(cdpFacilitatorConfig)
   : new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 
-// withBazaar() wraps the facilitator client so Bazaar extension data
-// actually gets extracted/forwarded during verify + settle.
 const facilitatorClient = withBazaar(baseFacilitatorClient);
 
 const resourceServer = new x402ResourceServer(facilitatorClient)
@@ -46,33 +49,18 @@ app.use(
   paymentMiddleware(
     {
       "GET /geo/lookup": {
-        accepts: [
-          {
-            scheme: "exact",
-            price: PRICE_PER_LOOKUP,
-            network: NETWORK,
-            payTo: PAY_TO,
-          },
-        ],
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
         description: "Forward geocode a free-text address into latitude, longitude, and IANA timezone.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
             input: { address: "Tokyo, Japan" },
             inputSchema: {
-              properties: {
-                address: { type: "string", description: "Address or place name to geocode" },
-              },
+              properties: { address: { type: "string", description: "Address or place name to geocode" } },
               required: ["address"],
             },
             output: {
-              example: {
-                query: "Tokyo, Japan",
-                lat: 35.6762,
-                lng: 139.6503,
-                timezone: "Asia/Tokyo",
-                display_name: "Tokyo, Japan",
-              },
+              example: { query: "Tokyo, Japan", lat: 35.6762, lng: 139.6503, timezone: "Asia/Tokyo", display_name: "Tokyo, Japan" },
               schema: {
                 properties: {
                   lat: { type: "number" },
@@ -86,14 +74,7 @@ app.use(
         },
       },
       "GET /geo/reverse": {
-        accepts: [
-          {
-            scheme: "exact",
-            price: PRICE_PER_LOOKUP,
-            network: NETWORK,
-            payTo: PAY_TO,
-          },
-        ],
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
         description: "Reverse geocode latitude/longitude coordinates into a place name and IANA timezone.",
         mimeType: "application/json",
         extensions: {
@@ -107,18 +88,48 @@ app.use(
               required: ["lat", "lng"],
             },
             output: {
-              example: {
-                lat: 35.6762,
-                lng: 139.6503,
-                timezone: "Asia/Tokyo",
-                display_name: "Tokyo, Japan",
-              },
+              example: { lat: 35.6762, lng: 139.6503, timezone: "Asia/Tokyo", display_name: "Tokyo, Japan" },
               schema: {
                 properties: {
                   lat: { type: "number" },
                   lng: { type: "number" },
                   timezone: { type: "string" },
                   display_name: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
+      "GET /oil/price": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description:
+          "Latest official daily spot price for WTI or Brent crude oil (USD/barrel), sourced from the U.S. Energy Information Administration. Note: this is official daily settlement data with ~1 business day lag, not live intraday trading data.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { benchmark: "wti" },
+            inputSchema: {
+              properties: {
+                benchmark: { type: "string", enum: ["wti", "brent"], description: "Which crude oil benchmark to fetch" },
+              },
+              required: [],
+            },
+            output: {
+              example: {
+                benchmark: "WTI",
+                price: 73.2,
+                unit: "Dollars per Barrel",
+                date: "2026-07-15",
+                source: "U.S. Energy Information Administration (EIA)",
+              },
+              schema: {
+                properties: {
+                  benchmark: { type: "string" },
+                  price: { type: "number" },
+                  unit: { type: "string" },
+                  date: { type: "string" },
+                  source: { type: "string" },
                 },
               },
             },
@@ -132,14 +143,18 @@ app.use(
 
 app.get("/", (req, res) => {
   res.json({
-    name: "Geo + Timezone Lookup API",
+    name: "Data Lookup API",
     status: "live",
-    paid_endpoints: ["GET /geo/lookup?address=...", "GET /geo/reverse?lat=...&lng=..."],
+    paid_endpoints: [
+      "GET /geo/lookup?address=...",
+      "GET /geo/reverse?lat=...&lng=...",
+      "GET /oil/price?benchmark=wti|brent",
+    ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com",
+    attribution: "Geocoding by LocationIQ.com. Oil prices from U.S. Energy Information Administration (EIA).",
   });
 });
 
@@ -147,18 +162,14 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/geo/lookup", async (req, res) => {
   const { address } = req.query;
-  if (!address) {
-    return res.status(400).json({ error: "Missing required query param: address" });
-  }
+  if (!address) return res.status(400).json({ error: "Missing required query param: address" });
 
   try {
     const { data } = await axios.get("https://us1.locationiq.com/v1/search", {
       params: { key: LOCATIONIQ_API_KEY, q: address, format: "json", limit: 1 },
     });
 
-    if (!data || data.length === 0) {
-      return res.status(404).json({ error: "No match found for that address" });
-    }
+    if (!data || data.length === 0) return res.status(404).json({ error: "No match found for that address" });
 
     const { lat, lon, display_name } = data[0];
     const tzMatches = findTimezone(parseFloat(lat), parseFloat(lon));
@@ -178,9 +189,7 @@ app.get("/geo/lookup", async (req, res) => {
 
 app.get("/geo/reverse", async (req, res) => {
   const { lat, lng } = req.query;
-  if (!lat || !lng) {
-    return res.status(400).json({ error: "Missing required query params: lat, lng" });
-  }
+  if (!lat || !lng) return res.status(400).json({ error: "Missing required query params: lat, lng" });
 
   try {
     const { data } = await axios.get("https://us1.locationiq.com/v1/reverse", {
@@ -201,10 +210,42 @@ app.get("/geo/reverse", async (req, res) => {
   }
 });
 
+app.get("/oil/price", async (req, res) => {
+  const benchmarkParam = (req.query.benchmark || "wti").toLowerCase();
+  const seriesMap = {
+    wti: { seriesId: "PET.RWTC.D", label: "WTI" },
+    brent: { seriesId: "PET.RBRTE.D", label: "Brent" },
+  };
+  const chosen = seriesMap[benchmarkParam];
+  if (!chosen) return res.status(400).json({ error: "benchmark must be 'wti' or 'brent'" });
+
+  try {
+    const { data } = await axios.get("https://api.eia.gov/v2/petroleum/pri/spt/data", {
+      params: { api_key: EIA_API_KEY, series_id: chosen.seriesId },
+    });
+
+    const points = data?.response?.data || [];
+    if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
+
+    // Sort client-side to guarantee the most recent point, regardless of API ordering
+    const latest = [...points].sort((a, b) => (a.period < b.period ? 1 : -1))[0];
+
+    res.json({
+      benchmark: chosen.label,
+      price: latest.value,
+      unit: latest.units || "Dollars per Barrel",
+      date: latest.period,
+      source: "U.S. Energy Information Administration (EIA)",
+    });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream EIA lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
-
