@@ -6,7 +6,7 @@ import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { facilitator as cdpFacilitatorConfig } from "@coinbase/x402";
-import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
+import { declareDiscoveryExtension, bazaarResourceServerExtension, withBazaar } from "@x402/extensions/bazaar";
 
 const PORT = process.env.PORT || 4021;
 const PAY_TO = process.env.PAY_TO_ADDRESS;
@@ -27,14 +27,17 @@ if (!LOCATIONIQ_API_KEY) {
 
 const app = express();
 
-const facilitatorClient = USING_CDP
+const baseFacilitatorClient = USING_CDP
   ? new HTTPFacilitatorClient(cdpFacilitatorConfig)
   : new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 
-const resourceServer = new x402ResourceServer(facilitatorClient).register(
-  NETWORK,
-  new ExactEvmScheme()
-);
+// withBazaar() wraps the facilitator client so Bazaar extension data
+// actually gets extracted/forwarded during verify + settle.
+const facilitatorClient = withBazaar(baseFacilitatorClient);
+
+const resourceServer = new x402ResourceServer(facilitatorClient)
+  .register(NETWORK, new ExactEvmScheme())
+  .registerExtension(bazaarResourceServerExtension);
 
 const PRICE_PER_LOOKUP = "$0.001";
 

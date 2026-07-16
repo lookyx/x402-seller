@@ -20,18 +20,18 @@ client.register("eip155:*", new ExactEvmScheme(signer));
 const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 const httpClient = new x402HTTPClient(client);
 
-const url = "https://x402-seller.onrender.com/geo/lookup?address=Tokyo";
+const url = "https://x402-seller.onrender.com/geo/lookup?address=Paris";
 
 console.log("Requesting:", url);
 
 const response = await fetchWithPayment(url, { method: "GET" });
+
+console.log("\nAll response headers:");
+for (const [key, value] of response.headers.entries()) {
+  console.log(`  ${key}: ${value}`);
+}
+
 const result = await httpClient.processResponse(response);
 
 console.log("\nResponse body:", result.body);
 console.log("Payment status:", result.paymentStatus);
-
-if (result.paymentStatus === "settled") {
-  console.log("✅ Payment settled:", result.header);
-} else if (result.paymentStatus === "settle_failed") {
-  console.error("❌ Settlement failed:", result.header);
-}
