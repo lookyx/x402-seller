@@ -30,6 +30,7 @@ if (!EIA_API_KEY) {
 }
 
 const app = express();
+app.set("trust proxy", 1);
 
 const baseFacilitatorClient = USING_CDP
   ? new HTTPFacilitatorClient(cdpFacilitatorConfig)
@@ -255,3 +256,4 @@ app.listen(PORT, () => {
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
+
