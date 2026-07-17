@@ -20,6 +20,8 @@ if (!PAY_TO) { console.error("\n❌ Missing PAY_TO_ADDRESS.\n"); process.exit(1)
 if (!LOCATIONIQ_API_KEY) { console.error("\n❌ Missing LOCATIONIQ_API_KEY.\n"); process.exit(1); }
 if (!EIA_API_KEY) { console.error("\n❌ Missing EIA_API_KEY.\n"); process.exit(1); }
 
+const NWS_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
+
 const app = express();
 app.set("trust proxy", 1);
 
@@ -153,6 +155,44 @@ app.use(
           }),
         },
       },
+      "GET /weather/forecast": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Official U.S. National Weather Service forecast (next period) for given coordinates. US locations only. Use /geo/lookup first if you only have an address.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { lat: "38.8894", lng: "-77.0352" },
+            inputSchema: {
+              properties: {
+                lat: { type: "string", description: "Latitude (US locations only)" },
+                lng: { type: "string", description: "Longitude (US locations only)" },
+              },
+              required: ["lat", "lng"],
+            },
+            output: {
+              example: {
+                location: "LWX",
+                period: "Tonight",
+                temperature: 68,
+                temperatureUnit: "F",
+                shortForecast: "Partly Cloudy",
+                detailedForecast: "Partly cloudy, with a low around 68.",
+                windSpeed: "5 mph",
+                windDirection: "SW",
+                source: "National Weather Service (NOAA)",
+              },
+              schema: {
+                properties: {
+                  period: { type: "string" }, temperature: { type: "number" },
+                  temperatureUnit: { type: "string" }, shortForecast: { type: "string" },
+                  detailedForecast: { type: "string" }, windSpeed: { type: "string" },
+                  windDirection: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
     },
     resourceServer
   )
@@ -168,12 +208,13 @@ app.get("/", (req, res) => {
       "GET /oil/price?benchmark=wti|brent",
       "GET /gas/price",
       "GET /electricity/price?state=US",
+      "GET /weather/forecast?lat=...&lng=... (US only)",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy prices from U.S. Energy Information Administration (EIA).",
+    attribution: "Geocoding by LocationIQ.com. Energy prices from EIA. Weather from National Weather Service (NOAA).",
   });
 });
 
@@ -264,22 +305,56 @@ app.get("/electricity/price", async (req, res) => {
     const points = data?.response?.data || [];
     if (points.length === 0) return res.status(404).json({ error: `No data found for state '${state}'` });
     const latest = points[0];
-    res.json({
-      region: latest.stateDescription || state,
-      price: latest.price,
-      unit: "cents per kilowatt-hour",
-      date: latest.period,
-      source: "U.S. Energy Information Administration (EIA)",
-    });
+    res.json({ region: latest.stateDescription || state, price: latest.price, unit: "cents per kilowatt-hour", date: latest.period, source: "U.S. Energy Information Administration (EIA)" });
   } catch (err) {
     console.error(err.response?.data || err.message);
     res.status(502).json({ error: "Upstream EIA lookup failed" });
   }
 });
 
+app.get("/weather/forecast", async (req, res) => {
+  const { lat, lng } = req.query;
+  if (!lat || !lng) return res.status(400).json({ error: "Missing required query params: lat, lng" });
+
+  try {
+    const pointsResp = await axios.get(`https://api.weather.gov/points/${lat},${lng}`, {
+      headers: { "User-Agent": NWS_USER_AGENT },
+    });
+
+    const forecastUrl = pointsResp.data?.properties?.forecast;
+    const gridId = pointsResp.data?.properties?.gridId;
+    if (!forecastUrl) return res.status(502).json({ error: "Could not resolve forecast URL for this location" });
+
+    const forecastResp = await axios.get(forecastUrl, {
+      headers: { "User-Agent": NWS_USER_AGENT },
+    });
+
+    const period = forecastResp.data?.properties?.periods?.[0];
+    if (!period) return res.status(502).json({ error: "No forecast data available for this location" });
+
+    res.json({
+      location: gridId || null,
+      period: period.name,
+      temperature: period.temperature,
+      temperatureUnit: period.temperatureUnit,
+      shortForecast: period.shortForecast,
+      detailedForecast: period.detailedForecast,
+      windSpeed: period.windSpeed,
+      windDirection: period.windDirection,
+      source: "National Weather Service (NOAA)",
+    });
+  } catch (err) {
+    if (err.response?.status === 404) {
+      return res.status(404).json({ error: "Location outside NWS coverage (US only)" });
+    }
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream NWS lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
