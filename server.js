@@ -16,10 +16,12 @@ const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://x402.org/facilit
 const USING_CDP = Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET);
 const LOCATIONIQ_API_KEY = process.env.LOCATIONIQ_API_KEY;
 const EIA_API_KEY = process.env.EIA_API_KEY;
+const AIRNOW_API_KEY = process.env.AIRNOW_API_KEY;
 
 if (!PAY_TO) { console.error("\n❌ Missing PAY_TO_ADDRESS.\n"); process.exit(1); }
 if (!LOCATIONIQ_API_KEY) { console.error("\n❌ Missing LOCATIONIQ_API_KEY.\n"); process.exit(1); }
 if (!EIA_API_KEY) { console.error("\n❌ Missing EIA_API_KEY.\n"); process.exit(1); }
+if (!AIRNOW_API_KEY) { console.error("\n❌ Missing AIRNOW_API_KEY.\n"); process.exit(1); }
 
 const NWS_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
 const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
@@ -260,6 +262,40 @@ app.use(
           }),
         },
       },
+      "GET /air/quality": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Current U.S. air quality index (AQI) readings near given coordinates, sourced from the EPA AirNow program (federal/state/local/tribal agencies). Data is preliminary and unvalidated per EPA data use guidelines — not for regulatory use. US/Canada/Mexico coverage only.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { lat: "37.7749", lng: "-122.4194" },
+            inputSchema: {
+              properties: {
+                lat: { type: "string", description: "Latitude" },
+                lng: { type: "string", description: "Longitude" },
+              },
+              required: ["lat", "lng"],
+            },
+            output: {
+              example: {
+                reportingArea: "San Francisco", stateCode: "CA", date: "2026-07-16", hour: 14,
+                readings: [{ pollutant: "PM2.5", aqi: 42, category: "Good" }, { pollutant: "O3", aqi: 38, category: "Good" }],
+                preliminary: true,
+                attribution: "Data owned by federal, state, local, and tribal air quality agencies, distributed via the U.S. EPA AirNow program.",
+                source: "U.S. EPA AirNow",
+              },
+              schema: {
+                properties: {
+                  reportingArea: { type: "string" }, stateCode: { type: "string" },
+                  date: { type: "string" }, hour: { type: "number" },
+                  readings: { type: "array" }, preliminary: { type: "boolean" },
+                  attribution: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
     },
     resourceServer
   )
@@ -279,12 +315,13 @@ app.get("/", (req, res) => {
       "GET /nuclear/outages",
       "GET /earthquakes/recent?minmagnitude=4.5&limit=10",
       "GET /currency/rate?from=USD&to=JPY",
+      "GET /air/quality?lat=...&lng=... (US/CA/MX only)",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB. Air quality from EPA AirNow.",
   });
 });
 
@@ -455,26 +492,18 @@ app.get("/earthquakes/recent", async (req, res) => {
 app.get("/currency/rate", async (req, res) => {
   const from = (req.query.from || "EUR").toUpperCase();
   const to = (req.query.to || "USD").toUpperCase();
-
   try {
     const { data: xml } = await axios.get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml");
     const parsed = xmlParser.parse(xml);
-
     const dayCube = parsed["gesmes:Envelope"]?.Cube?.Cube;
     const date = dayCube?.time;
     const rateEntries = dayCube?.Cube;
     const rateList = Array.isArray(rateEntries) ? rateEntries : [rateEntries];
-
     const rates = { EUR: 1 };
-    for (const entry of rateList) {
-      rates[entry.currency] = parseFloat(entry.rate);
-    }
-
+    for (const entry of rateList) rates[entry.currency] = parseFloat(entry.rate);
     if (!(from in rates)) return res.status(400).json({ error: `Unknown currency code: ${from}` });
     if (!(to in rates)) return res.status(400).json({ error: `Unknown currency code: ${to}` });
-
     const rate = rates[to] / rates[from];
-
     res.json({ from, to, rate: Number(rate.toFixed(6)), date, source: "European Central Bank (ECB)" });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -482,9 +511,51 @@ app.get("/currency/rate", async (req, res) => {
   }
 });
 
+app.get("/air/quality", async (req, res) => {
+  const { lat, lng } = req.query;
+  if (!lat || !lng) return res.status(400).json({ error: "Missing required query params: lat, lng" });
+
+  try {
+    const { data } = await axios.get("https://www.airnowapi.org/aq/observation/latLong/current/", {
+      params: {
+        format: "application/json",
+        latitude: lat,
+        longitude: lng,
+        distance: 25,
+        API_KEY: AIRNOW_API_KEY,
+      },
+    });
+
+    if (!Array.isArray(data) || data.length === 0) {
+      return res.status(404).json({ error: "No air quality data available near this location" });
+    }
+
+    const first = data[0];
+    const readings = data.map((r) => ({
+      pollutant: r.ParameterName,
+      aqi: r.AQI,
+      category: r.Category?.Name,
+    }));
+
+    res.json({
+      reportingArea: first.ReportingArea,
+      stateCode: first.StateCode,
+      date: first.DateObserved?.trim(),
+      hour: first.HourObserved,
+      readings,
+      preliminary: true,
+      attribution: "Data owned by federal, state, local, and tribal air quality agencies, distributed via the U.S. EPA AirNow program. Preliminary, unvalidated data — not for regulatory use.",
+      source: "U.S. EPA AirNow",
+    });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream AirNow lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });

@@ -17,12 +17,12 @@ client.register("eip155:*", new ExactEvmScheme(signer));
 const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 const httpClient = new x402HTTPClient(client);
 
-const url = "https://x402-seller.onrender.com/earthquakes/recent?minmagnitude=4.5&limit=5";
+const url = "https://x402-seller.onrender.com/currency/rate?from=USD&to=JPY";
 
 console.log("Requesting:", url);
 
 const response = await fetchWithPayment(url, { method: "GET" });
 const result = await httpClient.processResponse(response);
 
-console.log("\nResponse body:", JSON.stringify(result.body, null, 2));
+console.log("\nResponse body:", result.body);
 console.log("Payment status:", result.paymentStatus);
