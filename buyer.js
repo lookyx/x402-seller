@@ -20,7 +20,7 @@ client.register("eip155:*", new ExactEvmScheme(signer));
 const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 const httpClient = new x402HTTPClient(client);
 
-const url = "https://x402-seller.onrender.com/electricity/price";
+const url = "https://x402-seller.onrender.com/weather/forecast?lat=38.8894&lng=-77.0352";
 
 console.log("Requesting:", url);
 
