@@ -632,21 +632,37 @@ app.get("/space/asteroids", async (req, res) => {
   }
 });
 
+async function fetchGdeltWithRetry(params, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    const { data } = await axios.get("https://api.gdeltproject.org/api/v2/doc/doc", {
+      params,
+      responseType: "text",
+      transformResponse: [(d) => d],
+    });
+
+    if (typeof data === "string" && data.trim().startsWith("Please limit requests")) {
+      if (i === attempts - 1) throw new Error("GDELT rate limit not cleared after retries");
+      await new Promise((resolve) => setTimeout(resolve, 3000 * (i + 1)));
+      continue;
+    }
+
+    return JSON.parse(data);
+  }
+}
+
 app.get("/world/conflict-news", async (req, res) => {
   const query = req.query.query;
   if (!query) return res.status(400).json({ error: "Missing required query param: query" });
   const limit = Math.min(parseInt(req.query.limit, 10) || 10, 25);
 
   try {
-    const { data } = await axios.get("https://api.gdeltproject.org/api/v2/doc/doc", {
-      params: {
-        query,
-        mode: "ArtList",
-        format: "json",
-        maxrecords: limit,
-        sort: "datedesc",
-        timespan: "3d",
-      },
+    const data = await fetchGdeltWithRetry({
+      query,
+      mode: "ArtList",
+      format: "json",
+      maxrecords: limit,
+      sort: "datedesc",
+      timespan: "3d",
     });
 
     const articles = (data?.articles || []).map((a) => ({
@@ -660,7 +676,7 @@ app.get("/world/conflict-news", async (req, res) => {
     res.json({ query, count: articles.length, articles, source: "GDELT Project (global news monitoring)" });
   } catch (err) {
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream GDELT lookup failed" });
+    res.status(503).json({ error: "GDELT is currently rate-limiting this server. Please try again shortly." });
   }
 });
 
