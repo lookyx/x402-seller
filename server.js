@@ -171,15 +171,9 @@ app.use(
             },
             output: {
               example: {
-                location: "LWX",
-                period: "Tonight",
-                temperature: 68,
-                temperatureUnit: "F",
-                shortForecast: "Partly Cloudy",
-                detailedForecast: "Partly cloudy, with a low around 68.",
-                windSpeed: "5 mph",
-                windDirection: "SW",
-                source: "National Weather Service (NOAA)",
+                location: "LWX", period: "Tonight", temperature: 68, temperatureUnit: "F",
+                shortForecast: "Partly Cloudy", detailedForecast: "Partly cloudy, with a low around 68.",
+                windSpeed: "5 mph", windDirection: "SW", source: "National Weather Service (NOAA)",
               },
               schema: {
                 properties: {
@@ -187,6 +181,26 @@ app.use(
                   temperatureUnit: { type: "string" }, shortForecast: { type: "string" },
                   detailedForecast: { type: "string" }, windSpeed: { type: "string" },
                   windDirection: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
+      "GET /nuclear/outages": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Latest daily U.S. nuclear power plant outage data: total capacity, megawatts offline, and percent outage nationwide. Sourced from the U.S. Nuclear Regulatory Commission via EIA.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: {},
+            inputSchema: { properties: {}, required: [] },
+            output: {
+              example: { date: "2026-07-15", capacityMw: 96731, outageMw: 3200, percentOutage: 3.3, source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission" },
+              schema: {
+                properties: {
+                  date: { type: "string" }, capacityMw: { type: "number" },
+                  outageMw: { type: "number" }, percentOutage: { type: "number" }, source: { type: "string" },
                 },
               },
             },
@@ -209,12 +223,13 @@ app.get("/", (req, res) => {
       "GET /gas/price",
       "GET /electricity/price?state=US",
       "GET /weather/forecast?lat=...&lng=... (US only)",
+      "GET /nuclear/outages",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy prices from EIA. Weather from National Weather Service (NOAA).",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from National Weather Service (NOAA).",
   });
 });
 
@@ -315,46 +330,57 @@ app.get("/electricity/price", async (req, res) => {
 app.get("/weather/forecast", async (req, res) => {
   const { lat, lng } = req.query;
   if (!lat || !lng) return res.status(400).json({ error: "Missing required query params: lat, lng" });
-
   try {
     const pointsResp = await axios.get(`https://api.weather.gov/points/${lat},${lng}`, {
       headers: { "User-Agent": NWS_USER_AGENT },
     });
-
     const forecastUrl = pointsResp.data?.properties?.forecast;
     const gridId = pointsResp.data?.properties?.gridId;
     if (!forecastUrl) return res.status(502).json({ error: "Could not resolve forecast URL for this location" });
-
-    const forecastResp = await axios.get(forecastUrl, {
-      headers: { "User-Agent": NWS_USER_AGENT },
-    });
-
+    const forecastResp = await axios.get(forecastUrl, { headers: { "User-Agent": NWS_USER_AGENT } });
     const period = forecastResp.data?.properties?.periods?.[0];
     if (!period) return res.status(502).json({ error: "No forecast data available for this location" });
-
     res.json({
-      location: gridId || null,
-      period: period.name,
-      temperature: period.temperature,
-      temperatureUnit: period.temperatureUnit,
-      shortForecast: period.shortForecast,
-      detailedForecast: period.detailedForecast,
-      windSpeed: period.windSpeed,
-      windDirection: period.windDirection,
-      source: "National Weather Service (NOAA)",
+      location: gridId || null, period: period.name, temperature: period.temperature,
+      temperatureUnit: period.temperatureUnit, shortForecast: period.shortForecast,
+      detailedForecast: period.detailedForecast, windSpeed: period.windSpeed,
+      windDirection: period.windDirection, source: "National Weather Service (NOAA)",
     });
   } catch (err) {
-    if (err.response?.status === 404) {
-      return res.status(404).json({ error: "Location outside NWS coverage (US only)" });
-    }
+    if (err.response?.status === 404) return res.status(404).json({ error: "Location outside NWS coverage (US only)" });
     console.error(err.response?.data || err.message);
     res.status(502).json({ error: "Upstream NWS lookup failed" });
   }
 });
 
+app.get("/nuclear/outages", async (req, res) => {
+  try {
+    const { data } = await axios.get("https://api.eia.gov/v2/nuclear-outages/us-nuclear-outages/data", {
+      params: {
+        api_key: EIA_API_KEY, frequency: "daily",
+        "data[0]": "capacity", "data[1]": "outage", "data[2]": "percentOutage",
+        "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
+      },
+    });
+    const points = data?.response?.data || [];
+    if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
+    const latest = points[0];
+    res.json({
+      date: latest.period,
+      capacityMw: latest.capacity,
+      outageMw: latest.outage,
+      percentOutage: latest.percentOutage,
+      source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission",
+    });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream EIA lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
