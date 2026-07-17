@@ -16,18 +16,9 @@ const USING_CDP = Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_
 const LOCATIONIQ_API_KEY = process.env.LOCATIONIQ_API_KEY;
 const EIA_API_KEY = process.env.EIA_API_KEY;
 
-if (!PAY_TO) {
-  console.error("\n❌ Missing PAY_TO_ADDRESS.\n");
-  process.exit(1);
-}
-if (!LOCATIONIQ_API_KEY) {
-  console.error("\n❌ Missing LOCATIONIQ_API_KEY.\n");
-  process.exit(1);
-}
-if (!EIA_API_KEY) {
-  console.error("\n❌ Missing EIA_API_KEY.\n");
-  process.exit(1);
-}
+if (!PAY_TO) { console.error("\n❌ Missing PAY_TO_ADDRESS.\n"); process.exit(1); }
+if (!LOCATIONIQ_API_KEY) { console.error("\n❌ Missing LOCATIONIQ_API_KEY.\n"); process.exit(1); }
+if (!EIA_API_KEY) { console.error("\n❌ Missing EIA_API_KEY.\n"); process.exit(1); }
 
 const app = express();
 app.set("trust proxy", 1);
@@ -139,6 +130,29 @@ app.use(
           }),
         },
       },
+      "GET /electricity/price": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Latest average U.S. retail electricity price (cents/kWh), monthly data across all sectors, sourced from the U.S. Energy Information Administration. Optional 'state' param (2-letter code) for a specific state instead of the national average.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { state: "US" },
+            inputSchema: {
+              properties: { state: { type: "string", description: "2-letter US state code, or 'US' for national average" } },
+              required: [],
+            },
+            output: {
+              example: { region: "U.S. Total", price: 12.5, unit: "cents per kilowatt-hour", date: "2026-04", source: "U.S. Energy Information Administration (EIA)" },
+              schema: {
+                properties: {
+                  region: { type: "string" }, price: { type: "number" },
+                  unit: { type: "string" }, date: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
     },
     resourceServer
   )
@@ -153,12 +167,13 @@ app.get("/", (req, res) => {
       "GET /geo/reverse?lat=...&lng=...",
       "GET /oil/price?benchmark=wti|brent",
       "GET /gas/price",
+      "GET /electricity/price?state=US",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Oil and gas prices from U.S. Energy Information Administration (EIA).",
+    attribution: "Geocoding by LocationIQ.com. Energy prices from U.S. Energy Information Administration (EIA).",
   });
 });
 
@@ -198,23 +213,14 @@ app.get("/geo/reverse", async (req, res) => {
 
 app.get("/oil/price", async (req, res) => {
   const benchmarkParam = (req.query.benchmark || "wti").toLowerCase();
-  const seriesMap = {
-    wti: { code: "RWTC", label: "WTI" },
-    brent: { code: "RBRTE", label: "Brent" },
-  };
+  const seriesMap = { wti: { code: "RWTC", label: "WTI" }, brent: { code: "RBRTE", label: "Brent" } };
   const chosen = seriesMap[benchmarkParam];
   if (!chosen) return res.status(400).json({ error: "benchmark must be 'wti' or 'brent'" });
-
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/petroleum/pri/spt/data", {
       params: {
-        api_key: EIA_API_KEY,
-        frequency: "daily",
-        "data[0]": "value",
-        "facets[series][]": chosen.code,
-        "sort[0][column]": "period",
-        "sort[0][direction]": "desc",
-        length: 1,
+        api_key: EIA_API_KEY, frequency: "daily", "data[0]": "value",
+        "facets[series][]": chosen.code, "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
       },
     });
     const points = data?.response?.data || [];
@@ -231,13 +237,8 @@ app.get("/gas/price", async (req, res) => {
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/natural-gas/pri/fut/data", {
       params: {
-        api_key: EIA_API_KEY,
-        frequency: "daily",
-        "data[0]": "value",
-        "facets[series][]": "RNGWHHD",
-        "sort[0][column]": "period",
-        "sort[0][direction]": "desc",
-        length: 1,
+        api_key: EIA_API_KEY, frequency: "daily", "data[0]": "value",
+        "facets[series][]": "RNGWHHD", "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
       },
     });
     const points = data?.response?.data || [];
@@ -250,10 +251,35 @@ app.get("/gas/price", async (req, res) => {
   }
 });
 
+app.get("/electricity/price", async (req, res) => {
+  const state = (req.query.state || "US").toUpperCase();
+  try {
+    const { data } = await axios.get("https://api.eia.gov/v2/electricity/retail-sales/data", {
+      params: {
+        api_key: EIA_API_KEY, frequency: "monthly", "data[0]": "price",
+        "facets[stateid][]": state, "facets[sectorid][]": "ALL",
+        "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
+      },
+    });
+    const points = data?.response?.data || [];
+    if (points.length === 0) return res.status(404).json({ error: `No data found for state '${state}'` });
+    const latest = points[0];
+    res.json({
+      region: latest.stateDescription || state,
+      price: latest.price,
+      unit: "cents per kilowatt-hour",
+      date: latest.period,
+      source: "U.S. Energy Information Administration (EIA)",
+    });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream EIA lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
-
