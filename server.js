@@ -17,11 +17,13 @@ const USING_CDP = Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_
 const LOCATIONIQ_API_KEY = process.env.LOCATIONIQ_API_KEY;
 const EIA_API_KEY = process.env.EIA_API_KEY;
 const AIRNOW_API_KEY = process.env.AIRNOW_API_KEY;
+const NASA_API_KEY = process.env.NASA_API_KEY;
 
 if (!PAY_TO) { console.error("\n❌ Missing PAY_TO_ADDRESS.\n"); process.exit(1); }
 if (!LOCATIONIQ_API_KEY) { console.error("\n❌ Missing LOCATIONIQ_API_KEY.\n"); process.exit(1); }
 if (!EIA_API_KEY) { console.error("\n❌ Missing EIA_API_KEY.\n"); process.exit(1); }
 if (!AIRNOW_API_KEY) { console.error("\n❌ Missing AIRNOW_API_KEY.\n"); process.exit(1); }
+if (!NASA_API_KEY) { console.error("\n❌ Missing NASA_API_KEY.\n"); process.exit(1); }
 
 const NWS_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
 const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
@@ -296,6 +298,38 @@ app.use(
           }),
         },
       },
+      "GET /space/asteroids": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Near-Earth asteroids making their closest approach on a given date (default today), sorted by distance. Includes size, velocity, and miss distance. Sourced from NASA JPL's Near Earth Object Web Service.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { date: "2026-07-16" },
+            inputSchema: {
+              properties: { date: { type: "string", description: "YYYY-MM-DD, defaults to today" } },
+              required: [],
+            },
+            output: {
+              example: {
+                date: "2026-07-16",
+                count: 1,
+                asteroids: [{
+                  name: "465633 (2009 JR5)", hazardous: false,
+                  diameterKmMin: 0.19, diameterKmMax: 0.43,
+                  velocityKph: 28123.5, missDistanceKm: 4576123.9,
+                }],
+                source: "NASA JPL Near Earth Object Web Service (NeoWs)",
+              },
+              schema: {
+                properties: {
+                  date: { type: "string" }, count: { type: "number" },
+                  asteroids: { type: "array" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
     },
     resourceServer
   )
@@ -316,12 +350,13 @@ app.get("/", (req, res) => {
       "GET /earthquakes/recent?minmagnitude=4.5&limit=10",
       "GET /currency/rate?from=USD&to=JPY",
       "GET /air/quality?lat=...&lng=... (US/CA/MX only)",
+      "GET /space/asteroids?date=YYYY-MM-DD",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB. Air quality from EPA AirNow.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL.",
   });
 });
 
@@ -514,36 +549,16 @@ app.get("/currency/rate", async (req, res) => {
 app.get("/air/quality", async (req, res) => {
   const { lat, lng } = req.query;
   if (!lat || !lng) return res.status(400).json({ error: "Missing required query params: lat, lng" });
-
   try {
     const { data } = await axios.get("https://www.airnowapi.org/aq/observation/latLong/current/", {
-      params: {
-        format: "application/json",
-        latitude: lat,
-        longitude: lng,
-        distance: 25,
-        API_KEY: AIRNOW_API_KEY,
-      },
+      params: { format: "application/json", latitude: lat, longitude: lng, distance: 25, API_KEY: AIRNOW_API_KEY },
     });
-
-    if (!Array.isArray(data) || data.length === 0) {
-      return res.status(404).json({ error: "No air quality data available near this location" });
-    }
-
+    if (!Array.isArray(data) || data.length === 0) return res.status(404).json({ error: "No air quality data available near this location" });
     const first = data[0];
-    const readings = data.map((r) => ({
-      pollutant: r.ParameterName,
-      aqi: r.AQI,
-      category: r.Category?.Name,
-    }));
-
+    const readings = data.map((r) => ({ pollutant: r.ParameterName, aqi: r.AQI, category: r.Category?.Name }));
     res.json({
-      reportingArea: first.ReportingArea,
-      stateCode: first.StateCode,
-      date: first.DateObserved?.trim(),
-      hour: first.HourObserved,
-      readings,
-      preliminary: true,
+      reportingArea: first.ReportingArea, stateCode: first.StateCode,
+      date: first.DateObserved?.trim(), hour: first.HourObserved, readings, preliminary: true,
       attribution: "Data owned by federal, state, local, and tribal air quality agencies, distributed via the U.S. EPA AirNow program. Preliminary, unvalidated data — not for regulatory use.",
       source: "U.S. EPA AirNow",
     });
@@ -553,9 +568,40 @@ app.get("/air/quality", async (req, res) => {
   }
 });
 
+app.get("/space/asteroids", async (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0, 10);
+
+  try {
+    const { data } = await axios.get("https://api.nasa.gov/neo/rest/v1/feed", {
+      params: { start_date: date, end_date: date, api_key: NASA_API_KEY },
+    });
+
+    const dayList = data?.near_earth_objects?.[date] || [];
+
+    const asteroids = dayList
+      .map((neo) => {
+        const approach = neo.close_approach_data?.[0];
+        return {
+          name: neo.name,
+          hazardous: neo.is_potentially_hazardous_asteroid,
+          diameterKmMin: neo.estimated_diameter?.kilometers?.estimated_diameter_min ?? null,
+          diameterKmMax: neo.estimated_diameter?.kilometers?.estimated_diameter_max ?? null,
+          velocityKph: approach ? parseFloat(approach.relative_velocity.kilometers_per_hour) : null,
+          missDistanceKm: approach ? parseFloat(approach.miss_distance.kilometers) : null,
+        };
+      })
+      .sort((a, b) => (a.missDistanceKm ?? Infinity) - (b.missDistanceKm ?? Infinity));
+
+    res.json({ date, count: asteroids.length, asteroids, source: "NASA JPL Near Earth Object Web Service (NeoWs)" });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream NASA lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
