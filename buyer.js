@@ -5,10 +5,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/client";
 import { privateKeyToAccount } from "viem/accounts";
 
 const rawKey = process.env.BUYER_PRIVATE_KEY;
-if (!rawKey) {
-  console.error("Missing BUYER_PRIVATE_KEY in .env");
-  process.exit(1);
-}
+if (!rawKey) { console.error("Missing BUYER_PRIVATE_KEY in .env"); process.exit(1); }
 
 const privateKey = rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`;
 const signer = privateKeyToAccount(privateKey);
@@ -20,7 +17,7 @@ client.register("eip155:*", new ExactEvmScheme(signer));
 const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 const httpClient = new x402HTTPClient(client);
 
-const url = "https://x402-seller.onrender.com/weather/forecast?lat=38.8894&lng=-77.0352";
+const url = "https://x402-seller.onrender.com/nuclear/outages";
 
 console.log("Requesting:", url);
 

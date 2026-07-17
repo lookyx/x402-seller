@@ -207,6 +207,39 @@ app.use(
           }),
         },
       },
+      "GET /earthquakes/recent": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Recent significant earthquakes worldwide from the past 7 days, sourced from USGS. Optional 'minmagnitude' (default 4.5) and 'limit' (default 10, max 50).",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { minmagnitude: "4.5", limit: "10" },
+            inputSchema: {
+              properties: {
+                minmagnitude: { type: "string", description: "Minimum earthquake magnitude" },
+                limit: { type: "string", description: "Max number of results (max 50)" },
+              },
+              required: [],
+            },
+            output: {
+              example: {
+                count: 1,
+                earthquakes: [
+                  { place: "12 km ESE of Anza, CA", magnitude: 4.6, time: "2026-07-15T19:00:38.550Z", depthKm: 10.9, lat: 33.494, lng: -116.561, url: "https://earthquake.usgs.gov/earthquakes/eventpage/ci41439016" },
+                ],
+                source: "U.S. Geological Survey (USGS)",
+              },
+              schema: {
+                properties: {
+                  count: { type: "number" },
+                  earthquakes: { type: "array" },
+                  source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
     },
     resourceServer
   )
@@ -224,12 +257,13 @@ app.get("/", (req, res) => {
       "GET /electricity/price?state=US",
       "GET /weather/forecast?lat=...&lng=... (US only)",
       "GET /nuclear/outages",
+      "GET /earthquakes/recent?minmagnitude=4.5&limit=10",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from National Weather Service (NOAA).",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS.",
   });
 });
 
@@ -366,11 +400,8 @@ app.get("/nuclear/outages", async (req, res) => {
     if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
     const latest = points[0];
     res.json({
-      date: latest.period,
-      capacityMw: latest.capacity,
-      outageMw: latest.outage,
-      percentOutage: latest.percentOutage,
-      source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission",
+      date: latest.period, capacityMw: latest.capacity, outageMw: latest.outage,
+      percentOutage: latest.percentOutage, source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission",
     });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -378,9 +409,46 @@ app.get("/nuclear/outages", async (req, res) => {
   }
 });
 
+app.get("/earthquakes/recent", async (req, res) => {
+  const minmagnitude = req.query.minmagnitude || "4.5";
+  const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
+
+  const endtime = new Date();
+  const starttime = new Date(endtime.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  try {
+    const { data } = await axios.get("https://earthquake.usgs.gov/fdsnws/event/1/query", {
+      params: {
+        format: "geojson",
+        starttime: starttime.toISOString(),
+        endtime: endtime.toISOString(),
+        minmagnitude,
+        orderby: "time",
+        limit,
+      },
+    });
+
+    const features = data?.features || [];
+    const earthquakes = features.map((f) => ({
+      place: f.properties.place,
+      magnitude: f.properties.mag,
+      time: new Date(f.properties.time).toISOString(),
+      depthKm: f.geometry?.coordinates?.[2] ?? null,
+      lat: f.geometry?.coordinates?.[1] ?? null,
+      lng: f.geometry?.coordinates?.[0] ?? null,
+      url: f.properties.url,
+    }));
+
+    res.json({ count: earthquakes.length, earthquakes, source: "U.S. Geological Survey (USGS)" });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream USGS lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
