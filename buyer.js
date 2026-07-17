@@ -17,7 +17,7 @@ client.register("eip155:*", new ExactEvmScheme(signer));
 const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 const httpClient = new x402HTTPClient(client);
 
-const url = "https://x402-seller.onrender.com/air/quality?lat=37.7749&lng=-122.4194";
+const url = "https://x402-seller.onrender.com/space/asteroids";
 
 console.log("Requesting:", url);
 

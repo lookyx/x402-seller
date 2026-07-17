@@ -330,6 +330,43 @@ app.use(
           }),
         },
       },
+      "GET /world/conflict-news": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Recent global news coverage matching a conflict/security-related search query (e.g. a country, region, or conflict name), aggregated from worldwide news monitoring. Returns article metadata (title, source, date, link) only — not full article text. Sourced from the GDELT Project. Neutral aggregation of mainstream reporting; does not editorialize.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { query: "Ukraine", limit: "10" },
+            inputSchema: {
+              properties: {
+                query: { type: "string", description: "Search keywords (e.g. a country, region, or conflict name)" },
+                limit: { type: "string", description: "Max number of results (max 25)" },
+              },
+              required: ["query"],
+            },
+            output: {
+              example: {
+                query: "Ukraine",
+                count: 1,
+                articles: [{
+                  title: "Example headline about the topic",
+                  url: "https://example.com/article",
+                  domain: "example.com",
+                  sourceCountry: "United States",
+                  publishedDate: "2026-07-16T14:30:00Z",
+                }],
+                source: "GDELT Project (global news monitoring)",
+              },
+              schema: {
+                properties: {
+                  query: { type: "string" }, count: { type: "number" },
+                  articles: { type: "array" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
     },
     resourceServer
   )
@@ -351,12 +388,13 @@ app.get("/", (req, res) => {
       "GET /currency/rate?from=USD&to=JPY",
       "GET /air/quality?lat=...&lng=... (US/CA/MX only)",
       "GET /space/asteroids?date=YYYY-MM-DD",
+      "GET /world/conflict-news?query=...&limit=10",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project.",
   });
 });
 
@@ -570,20 +608,16 @@ app.get("/air/quality", async (req, res) => {
 
 app.get("/space/asteroids", async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
-
   try {
     const { data } = await axios.get("https://api.nasa.gov/neo/rest/v1/feed", {
       params: { start_date: date, end_date: date, api_key: NASA_API_KEY },
     });
-
     const dayList = data?.near_earth_objects?.[date] || [];
-
     const asteroids = dayList
       .map((neo) => {
         const approach = neo.close_approach_data?.[0];
         return {
-          name: neo.name,
-          hazardous: neo.is_potentially_hazardous_asteroid,
+          name: neo.name, hazardous: neo.is_potentially_hazardous_asteroid,
           diameterKmMin: neo.estimated_diameter?.kilometers?.estimated_diameter_min ?? null,
           diameterKmMax: neo.estimated_diameter?.kilometers?.estimated_diameter_max ?? null,
           velocityKph: approach ? parseFloat(approach.relative_velocity.kilometers_per_hour) : null,
@@ -591,7 +625,6 @@ app.get("/space/asteroids", async (req, res) => {
         };
       })
       .sort((a, b) => (a.missDistanceKm ?? Infinity) - (b.missDistanceKm ?? Infinity));
-
     res.json({ date, count: asteroids.length, asteroids, source: "NASA JPL Near Earth Object Web Service (NeoWs)" });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -599,9 +632,41 @@ app.get("/space/asteroids", async (req, res) => {
   }
 });
 
+app.get("/world/conflict-news", async (req, res) => {
+  const query = req.query.query;
+  if (!query) return res.status(400).json({ error: "Missing required query param: query" });
+  const limit = Math.min(parseInt(req.query.limit, 10) || 10, 25);
+
+  try {
+    const { data } = await axios.get("https://api.gdeltproject.org/api/v2/doc/doc", {
+      params: {
+        query,
+        mode: "ArtList",
+        format: "json",
+        maxrecords: limit,
+        sort: "datedesc",
+        timespan: "3d",
+      },
+    });
+
+    const articles = (data?.articles || []).map((a) => ({
+      title: a.title,
+      url: a.url,
+      domain: a.domain,
+      sourceCountry: a.sourcecountry,
+      publishedDate: a.seendate,
+    }));
+
+    res.json({ query, count: articles.length, articles, source: "GDELT Project (global news monitoring)" });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream GDELT lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /world/conflict-news`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
