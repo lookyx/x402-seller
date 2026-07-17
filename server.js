@@ -26,6 +26,7 @@ if (!AIRNOW_API_KEY) { console.error("\n❌ Missing AIRNOW_API_KEY.\n"); process
 if (!NASA_API_KEY) { console.error("\n❌ Missing NASA_API_KEY.\n"); process.exit(1); }
 
 const NWS_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
+const BASE_RPC_URL = "https://mainnet.base.org";
 const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
 const app = express();
@@ -367,6 +368,39 @@ app.use(
           }),
         },
       },
+      "GET /chain/balance": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Live wallet balance on Base mainnet: native ETH plus an optional ERC20 token balance. Sourced from Base's official public RPC.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
+            inputSchema: {
+              properties: {
+                address: { type: "string", description: "Wallet address (0x...)" },
+                token: { type: "string", description: "Optional ERC20 token contract address to also check" },
+              },
+              required: ["address"],
+            },
+            output: {
+              example: {
+                address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                network: "base",
+                ethBalance: 1.2345,
+                token: null,
+                source: "Base mainnet public RPC",
+              },
+              schema: {
+                properties: {
+                  address: { type: "string" }, network: { type: "string" },
+                  ethBalance: { type: "number" }, token: { type: ["object", "null"] },
+                  source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
     },
     resourceServer
   )
@@ -389,12 +423,13 @@ app.get("/", (req, res) => {
       "GET /air/quality?lat=...&lng=... (US/CA/MX only)",
       "GET /space/asteroids?date=YYYY-MM-DD",
       "GET /world/conflict-news?query=...&limit=10",
+      "GET /chain/balance?address=0x...&token=0x... (optional)",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project. Chain data from Base public RPC.",
   });
 });
 
@@ -639,13 +674,11 @@ async function fetchGdeltWithRetry(params, attempts = 3) {
       responseType: "text",
       transformResponse: [(d) => d],
     });
-
     if (typeof data === "string" && data.trim().startsWith("Please limit requests")) {
       if (i === attempts - 1) throw new Error("GDELT rate limit not cleared after retries");
       await new Promise((resolve) => setTimeout(resolve, 3000 * (i + 1)));
       continue;
     }
-
     return JSON.parse(data);
   }
 }
@@ -654,25 +687,13 @@ app.get("/world/conflict-news", async (req, res) => {
   const query = req.query.query;
   if (!query) return res.status(400).json({ error: "Missing required query param: query" });
   const limit = Math.min(parseInt(req.query.limit, 10) || 10, 25);
-
   try {
     const data = await fetchGdeltWithRetry({
-      query,
-      mode: "ArtList",
-      format: "json",
-      maxrecords: limit,
-      sort: "datedesc",
-      timespan: "3d",
+      query, mode: "ArtList", format: "json", maxrecords: limit, sort: "datedesc", timespan: "3d",
     });
-
     const articles = (data?.articles || []).map((a) => ({
-      title: a.title,
-      url: a.url,
-      domain: a.domain,
-      sourceCountry: a.sourcecountry,
-      publishedDate: a.seendate,
+      title: a.title, url: a.url, domain: a.domain, sourceCountry: a.sourcecountry, publishedDate: a.seendate,
     }));
-
     res.json({ query, count: articles.length, articles, source: "GDELT Project (global news monitoring)" });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -680,9 +701,58 @@ app.get("/world/conflict-news", async (req, res) => {
   }
 });
 
+async function baseRpcCall(method, params, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const { data } = await axios.post(BASE_RPC_URL, {
+        jsonrpc: "2.0", id: 1, method, params,
+      });
+      if (data.error) throw new Error(data.error.message || "RPC error");
+      return data.result;
+    } catch (err) {
+      if (i === attempts - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 1500 * (i + 1)));
+    }
+  }
+}
+
+app.get("/chain/balance", async (req, res) => {
+  const { address, token } = req.query;
+  if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    return res.status(400).json({ error: "Missing or invalid 'address' query param (expected 0x... format)" });
+  }
+
+  try {
+    const ethBalanceHex = await baseRpcCall("eth_getBalance", [address, "latest"]);
+    const ethBalance = Number(BigInt(ethBalanceHex)) / 1e18;
+
+    let tokenResult = null;
+    if (token) {
+      if (!/^0x[a-fA-F0-9]{40}$/.test(token)) {
+        return res.status(400).json({ error: "Invalid 'token' query param (expected 0x... format)" });
+      }
+      const paddedAddress = address.slice(2).toLowerCase().padStart(64, "0");
+      const balanceHex = await baseRpcCall("eth_call", [{ to: token, data: `0x70a08231${paddedAddress}` }, "latest"]);
+      const decimalsHex = await baseRpcCall("eth_call", [{ to: token, data: "0x313ce567" }, "latest"]);
+      const decimals = parseInt(decimalsHex, 16) || 18;
+      const rawBalance = BigInt(balanceHex);
+      tokenResult = {
+        contract: token,
+        decimals,
+        balance: Number(rawBalance) / 10 ** decimals,
+      };
+    }
+
+    res.json({ address, network: "base", ethBalance, token: tokenResult, source: "Base mainnet public RPC" });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream Base RPC lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /world/conflict-news`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /world/conflict-news, GET /chain/balance`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
