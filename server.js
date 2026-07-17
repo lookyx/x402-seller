@@ -2,6 +2,7 @@
 import express from "express";
 import axios from "axios";
 import { find as findTimezone } from "geo-tz";
+import { XMLParser } from "fast-xml-parser";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
@@ -21,6 +22,7 @@ if (!LOCATIONIQ_API_KEY) { console.error("\n❌ Missing LOCATIONIQ_API_KEY.\n");
 if (!EIA_API_KEY) { console.error("\n❌ Missing EIA_API_KEY.\n"); process.exit(1); }
 
 const NWS_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
+const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
 const app = express();
 app.set("trust proxy", 1);
@@ -224,16 +226,34 @@ app.use(
             output: {
               example: {
                 count: 1,
-                earthquakes: [
-                  { place: "12 km ESE of Anza, CA", magnitude: 4.6, time: "2026-07-15T19:00:38.550Z", depthKm: 10.9, lat: 33.494, lng: -116.561, url: "https://earthquake.usgs.gov/earthquakes/eventpage/ci41439016" },
-                ],
+                earthquakes: [{ place: "12 km ESE of Anza, CA", magnitude: 4.6, time: "2026-07-15T19:00:38.550Z", depthKm: 10.9, lat: 33.494, lng: -116.561, url: "https://earthquake.usgs.gov/earthquakes/eventpage/ci41439016" }],
                 source: "U.S. Geological Survey (USGS)",
               },
+              schema: { properties: { count: { type: "number" }, earthquakes: { type: "array" }, source: { type: "string" } } },
+            },
+          }),
+        },
+      },
+      "GET /currency/rate": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Official daily currency exchange rate between any two currencies (30+ major currencies), sourced from the European Central Bank. Updates once per business day (~16:00 CET), not live/intraday.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { from: "USD", to: "JPY" },
+            inputSchema: {
+              properties: {
+                from: { type: "string", description: "3-letter currency code (default EUR)" },
+                to: { type: "string", description: "3-letter currency code (default USD)" },
+              },
+              required: [],
+            },
+            output: {
+              example: { from: "USD", to: "JPY", rate: 157.23, date: "2026-07-15", source: "European Central Bank (ECB)" },
               schema: {
                 properties: {
-                  count: { type: "number" },
-                  earthquakes: { type: "array" },
-                  source: { type: "string" },
+                  from: { type: "string" }, to: { type: "string" },
+                  rate: { type: "number" }, date: { type: "string" }, source: { type: "string" },
                 },
               },
             },
@@ -258,12 +278,13 @@ app.get("/", (req, res) => {
       "GET /weather/forecast?lat=...&lng=... (US only)",
       "GET /nuclear/outages",
       "GET /earthquakes/recent?minmagnitude=4.5&limit=10",
+      "GET /currency/rate?from=USD&to=JPY",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB.",
   });
 });
 
@@ -412,33 +433,18 @@ app.get("/nuclear/outages", async (req, res) => {
 app.get("/earthquakes/recent", async (req, res) => {
   const minmagnitude = req.query.minmagnitude || "4.5";
   const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
-
   const endtime = new Date();
   const starttime = new Date(endtime.getTime() - 7 * 24 * 60 * 60 * 1000);
-
   try {
     const { data } = await axios.get("https://earthquake.usgs.gov/fdsnws/event/1/query", {
-      params: {
-        format: "geojson",
-        starttime: starttime.toISOString(),
-        endtime: endtime.toISOString(),
-        minmagnitude,
-        orderby: "time",
-        limit,
-      },
+      params: { format: "geojson", starttime: starttime.toISOString(), endtime: endtime.toISOString(), minmagnitude, orderby: "time", limit },
     });
-
     const features = data?.features || [];
     const earthquakes = features.map((f) => ({
-      place: f.properties.place,
-      magnitude: f.properties.mag,
-      time: new Date(f.properties.time).toISOString(),
-      depthKm: f.geometry?.coordinates?.[2] ?? null,
-      lat: f.geometry?.coordinates?.[1] ?? null,
-      lng: f.geometry?.coordinates?.[0] ?? null,
-      url: f.properties.url,
+      place: f.properties.place, magnitude: f.properties.mag, time: new Date(f.properties.time).toISOString(),
+      depthKm: f.geometry?.coordinates?.[2] ?? null, lat: f.geometry?.coordinates?.[1] ?? null,
+      lng: f.geometry?.coordinates?.[0] ?? null, url: f.properties.url,
     }));
-
     res.json({ count: earthquakes.length, earthquakes, source: "U.S. Geological Survey (USGS)" });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -446,9 +452,39 @@ app.get("/earthquakes/recent", async (req, res) => {
   }
 });
 
+app.get("/currency/rate", async (req, res) => {
+  const from = (req.query.from || "EUR").toUpperCase();
+  const to = (req.query.to || "USD").toUpperCase();
+
+  try {
+    const { data: xml } = await axios.get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml");
+    const parsed = xmlParser.parse(xml);
+
+    const dayCube = parsed["gesmes:Envelope"]?.Cube?.Cube;
+    const date = dayCube?.time;
+    const rateEntries = dayCube?.Cube;
+    const rateList = Array.isArray(rateEntries) ? rateEntries : [rateEntries];
+
+    const rates = { EUR: 1 };
+    for (const entry of rateList) {
+      rates[entry.currency] = parseFloat(entry.rate);
+    }
+
+    if (!(from in rates)) return res.status(400).json({ error: `Unknown currency code: ${from}` });
+    if (!(to in rates)) return res.status(400).json({ error: `Unknown currency code: ${to}` });
+
+    const rate = rates[to] / rates[from];
+
+    res.json({ from, to, rate: Number(rate.toFixed(6)), date, source: "European Central Bank (ECB)" });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream ECB lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
