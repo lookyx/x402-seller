@@ -1141,10 +1141,7 @@ app.get("/water/streamflow", async (req, res) => {
   }
 });
 
-// Temporary diagnostic (Jul 2026): log unmatched paths to identify 404 traffic source.
-// Grep Render logs for "[404]". Remove the console.log once the investigation is done.
 app.use((req, res) => {
-  console.log(`[404] ${req.method} ${req.originalUrl} ua="${req.get("user-agent") || "-"}" ip=${req.ip}`);
   res.status(404).json({ error: "Not found. GET / lists all available endpoints." });
 });
 
