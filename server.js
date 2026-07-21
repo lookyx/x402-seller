@@ -98,7 +98,7 @@ app.use(
       },
       "GET /oil/price": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Latest official daily spot price for WTI or Brent crude oil (USD/barrel), sourced from the U.S. Energy Information Administration. ~1 business day lag, not live trading data.",
+        description: "Latest official daily spot price for WTI or Brent crude oil (USD/barrel), sourced from the U.S. Energy Information Administration. Data lags several business days behind the market; not live trading data.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -121,7 +121,7 @@ app.use(
       },
       "GET /gas/price": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Latest Henry Hub natural gas spot price (USD/MMBtu), sourced from the U.S. Energy Information Administration. ~1 business day lag, not live trading data.",
+        description: "Latest Henry Hub natural gas spot price (USD/MMBtu), sourced from the U.S. Energy Information Administration. Data lags several business days behind the market; not live trading data.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -582,7 +582,7 @@ app.get("/oil/price", async (req, res) => {
     const points = data?.response?.data || [];
     if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
     const latest = points[0];
-    res.json({ benchmark: chosen.label, price: latest.value, unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" });
+    res.json({ benchmark: chosen.label, price: latest.value != null ? parseFloat(latest.value) : null, unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" });
   } catch (err) {
     console.error(err.response?.data || err.message);
     res.status(502).json({ error: "Upstream EIA lookup failed" });
@@ -600,7 +600,7 @@ app.get("/gas/price", async (req, res) => {
     const points = data?.response?.data || [];
     if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
     const latest = points[0];
-    res.json({ benchmark: "Henry Hub", price: latest.value, unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" });
+    res.json({ benchmark: "Henry Hub", price: latest.value != null ? parseFloat(latest.value) : null, unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" });
   } catch (err) {
     console.error(err.response?.data || err.message);
     res.status(502).json({ error: "Upstream EIA lookup failed" });
