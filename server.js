@@ -401,6 +401,98 @@ app.use(
           }),
         },
       },
+      "GET /treasury/debt": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Latest total U.S. national debt outstanding ('Debt to the Penny'): total public debt, debt held by the public, and intragovernmental holdings. Updated each business day by the U.S. Treasury.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: {},
+            inputSchema: { properties: {}, required: [] },
+            output: {
+              example: {
+                date: "2026-07-17", totalDebt: 39581848442144.38,
+                debtHeldByPublic: 31816915417245.04, intragovernmentalHoldings: 7764933024899.34,
+                unit: "US dollars", source: "U.S. Department of the Treasury, Fiscal Data (Debt to the Penny)",
+              },
+              schema: {
+                properties: {
+                  date: { type: "string" }, totalDebt: { type: "number" },
+                  debtHeldByPublic: { type: "number" }, intragovernmentalHoldings: { type: "number" },
+                  unit: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
+      "GET /ocean/tides": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "U.S. coastal tide data from NOAA: high/low tide predictions for the next 48 hours (product=predictions, default) or the latest observed water level (product=water_level) at a NOAA CO-OPS station. Heights in feet above MLLW datum, times in GMT. Requires a NOAA station ID (e.g. 9414290 = San Francisco).",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { station: "9414290", product: "predictions" },
+            inputSchema: {
+              properties: {
+                station: { type: "string", description: "NOAA CO-OPS station ID (e.g. 9414290 for San Francisco)" },
+                product: { type: "string", enum: ["predictions", "water_level"], description: "predictions = next 48h high/low tides (default); water_level = latest observed reading" },
+              },
+              required: ["station"],
+            },
+            output: {
+              example: {
+                station: "9414290", stationName: "San Francisco", lat: 37.8063, lng: -122.4659,
+                product: "predictions", datum: "MLLW", units: "feet", timeZone: "GMT",
+                tides: [{ time: "2026-07-20 11:43", heightFt: 4.222, type: "H" }],
+                source: "NOAA Center for Operational Oceanographic Products and Services (CO-OPS)",
+              },
+              schema: {
+                properties: {
+                  station: { type: "string" }, stationName: { type: ["string", "null"] },
+                  lat: { type: ["number", "null"] }, lng: { type: ["number", "null"] },
+                  product: { type: "string" }, datum: { type: "string" },
+                  units: { type: "string" }, timeZone: { type: "string" },
+                  tides: { type: "array" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
+      "GET /water/streamflow": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Latest real-time river conditions at a USGS stream gauge: streamflow (cubic feet per second) and gauge height (feet). Data is provisional and subject to revision. Requires a USGS site number (e.g. 09380000 = Colorado River at Lees Ferry, AZ).",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { site: "09380000" },
+            inputSchema: {
+              properties: { site: { type: "string", description: "USGS site number (e.g. 09380000)" } },
+              required: ["site"],
+            },
+            output: {
+              example: {
+                site: "09380000", siteName: "COLORADO RIVER AT LEES FERRY, AZ",
+                lat: 36.8643, lng: -111.5879,
+                streamflowCfs: 8770, gaugeHeightFt: 9.51, time: "2026-07-20T21:15:00.000-07:00",
+                provisional: true,
+                attribution: "Provisional data subject to revision. See https://waterdata.usgs.gov/nwis/help/?provisional",
+                source: "U.S. Geological Survey (USGS) National Water Information System",
+              },
+              schema: {
+                properties: {
+                  site: { type: "string" }, siteName: { type: ["string", "null"] },
+                  lat: { type: ["number", "null"] }, lng: { type: ["number", "null"] },
+                  streamflowCfs: { type: ["number", "null"] }, gaugeHeightFt: { type: ["number", "null"] },
+                  time: { type: ["string", "null"] }, provisional: { type: "boolean" },
+                  attribution: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
     },
     resourceServer
   )
@@ -424,12 +516,15 @@ app.get("/", (req, res) => {
       "GET /space/asteroids?date=YYYY-MM-DD",
       "GET /world/conflict-news?query=...&limit=10",
       "GET /chain/balance?address=0x...&token=0x... (optional)",
+      "GET /treasury/debt",
+      "GET /ocean/tides?station=9414290&product=predictions|water_level (US coastal stations)",
+      "GET /water/streamflow?site=09380000 (US stream gauges)",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather from NOAA. Earthquake data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project. Chain data from Base public RPC.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
   });
 });
 
@@ -750,9 +845,111 @@ app.get("/chain/balance", async (req, res) => {
   }
 });
 
+app.get("/treasury/debt", async (req, res) => {
+  try {
+    const { data } = await axios.get(
+      "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/debt_to_penny",
+      { params: { sort: "-record_date", "page[size]": 1 } }
+    );
+    const latest = data?.data?.[0];
+    if (!latest) return res.status(502).json({ error: "No data returned from Treasury Fiscal Data" });
+    res.json({
+      date: latest.record_date,
+      totalDebt: parseFloat(latest.tot_pub_debt_out_amt),
+      debtHeldByPublic: parseFloat(latest.debt_held_public_amt),
+      intragovernmentalHoldings: parseFloat(latest.intragov_hold_amt),
+      unit: "US dollars",
+      source: "U.S. Department of the Treasury, Fiscal Data (Debt to the Penny)",
+    });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream Treasury Fiscal Data lookup failed" });
+  }
+});
+
+app.get("/ocean/tides", async (req, res) => {
+  const { station } = req.query;
+  const product = req.query.product || "predictions";
+  if (!station) return res.status(400).json({ error: "Missing required query param: station (NOAA CO-OPS station ID, e.g. 9414290)" });
+  if (!["predictions", "water_level"].includes(product)) {
+    return res.status(400).json({ error: "product must be 'predictions' or 'water_level'" });
+  }
+  const baseParams = { station, datum: "MLLW", time_zone: "gmt", units: "english", format: "json" };
+  const params = product === "predictions"
+    ? { ...baseParams, product: "predictions", interval: "hilo", range: 48 }
+    : { ...baseParams, product: "water_level", date: "latest" };
+  try {
+    const { data } = await axios.get("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter", { params });
+    if (data?.error) return res.status(404).json({ error: data.error.message || "NOAA returned an error for this station" });
+    const meta = data?.metadata || {};
+    const common = {
+      station, stationName: meta.name || null,
+      lat: meta.lat ? parseFloat(meta.lat) : null, lng: meta.lon ? parseFloat(meta.lon) : null,
+      product, datum: "MLLW", units: "feet", timeZone: "GMT",
+      source: "NOAA Center for Operational Oceanographic Products and Services (CO-OPS)",
+    };
+    if (product === "predictions") {
+      const tides = (data?.predictions || []).map((p) => ({ time: p.t, heightFt: parseFloat(p.v), type: p.type }));
+      if (tides.length === 0) return res.status(404).json({ error: "No tide predictions available for this station" });
+      return res.json({ ...common, tides });
+    }
+    const obs = data?.data?.[0];
+    if (!obs) return res.status(404).json({ error: "No water level observation available for this station" });
+    res.json({ ...common, time: obs.t, heightFt: parseFloat(obs.v), preliminary: obs.q === "p" });
+  } catch (err) {
+    const noaaMessage = err.response?.data?.error?.message;
+    if (err.response?.status === 400 && noaaMessage) {
+      return res.status(404).json({ error: noaaMessage.trim() });
+    }
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream NOAA CO-OPS lookup failed" });
+  }
+});
+
+app.get("/water/streamflow", async (req, res) => {
+  const { site } = req.query;
+  if (!site) return res.status(400).json({ error: "Missing required query param: site (USGS site number, e.g. 09380000)" });
+  try {
+    const { data } = await axios.get("https://waterservices.usgs.gov/nwis/iv/", {
+      params: { format: "json", sites: site, parameterCd: "00060,00065", siteStatus: "all" },
+    });
+    const seriesList = data?.value?.timeSeries || [];
+    if (seriesList.length === 0) return res.status(404).json({ error: `No data found for USGS site '${site}'` });
+    const result = {
+      site, siteName: null, lat: null, lng: null,
+      streamflowCfs: null, gaugeHeightFt: null, time: null,
+      provisional: false,
+      attribution: "Provisional data subject to revision. See https://waterdata.usgs.gov/nwis/help/?provisional",
+      source: "U.S. Geological Survey (USGS) National Water Information System",
+    };
+    for (const series of seriesList) {
+      const code = series.variable?.variableCode?.[0]?.value;
+      const point = series.values?.[0]?.value?.[0];
+      if (!point) continue;
+      const numValue = parseFloat(point.value);
+      const noData = series.variable?.noDataValue;
+      if (noData !== undefined && numValue === noData) continue;
+      result.siteName = series.sourceInfo?.siteName || result.siteName;
+      const geo = series.sourceInfo?.geoLocation?.geogLocation;
+      if (geo) { result.lat = geo.latitude ?? result.lat; result.lng = geo.longitude ?? result.lng; }
+      result.time = point.dateTime || result.time;
+      if (point.qualifiers?.includes("P")) result.provisional = true;
+      if (code === "00060") result.streamflowCfs = numValue;
+      if (code === "00065") result.gaugeHeightFt = numValue;
+    }
+    if (result.streamflowCfs === null && result.gaugeHeightFt === null) {
+      return res.status(404).json({ error: `Site '${site}' exists but reports no current streamflow or gauge height data` });
+    }
+    res.json(result);
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(502).json({ error: "Upstream USGS lookup failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /world/conflict-news, GET /chain/balance`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /world/conflict-news, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
