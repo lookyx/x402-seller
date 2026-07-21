@@ -875,8 +875,12 @@ app.get("/ocean/tides", async (req, res) => {
     return res.status(400).json({ error: "product must be 'predictions' or 'water_level'" });
   }
   const baseParams = { station, datum: "MLLW", time_zone: "gmt", units: "english", format: "json" };
+  // NOAA's `range` alone counts BACKWARD from now; begin_date makes it count forward
+  const pad = (n) => String(n).padStart(2, "0");
+  const now = new Date();
+  const beginDate = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}`;
   const params = product === "predictions"
-    ? { ...baseParams, product: "predictions", interval: "hilo", range: 48 }
+    ? { ...baseParams, product: "predictions", interval: "hilo", begin_date: beginDate, range: 48 }
     : { ...baseParams, product: "water_level", date: "latest" };
   try {
     const { data } = await axios.get("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter", { params });
