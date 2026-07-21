@@ -502,6 +502,7 @@ app.get("/", (req, res) => {
   res.json({
     name: "Data Lookup API",
     status: "live",
+    commit: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || "dev",
     paid_endpoints: [
       "GET /geo/lookup?address=...",
       "GET /geo/reverse?lat=...&lng=...",
@@ -883,12 +884,20 @@ app.get("/ocean/tides", async (req, res) => {
     ? { ...baseParams, product: "predictions", interval: "hilo", begin_date: beginDate, range: 48 }
     : { ...baseParams, product: "water_level", date: "latest" };
   try {
-    const { data } = await axios.get("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter", { params });
+    // predictions responses carry no station metadata (water_level does), so fetch it separately
+    const [{ data }, stationMeta] = await Promise.all([
+      axios.get("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter", { params }),
+      axios
+        .get(`https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/${encodeURIComponent(station)}.json`)
+        .then((r) => r.data?.stations?.[0] || null)
+        .catch(() => null),
+    ]);
     if (data?.error) return res.status(404).json({ error: data.error.message || "NOAA returned an error for this station" });
     const meta = data?.metadata || {};
     const common = {
-      station, stationName: meta.name || null,
-      lat: meta.lat ? parseFloat(meta.lat) : null, lng: meta.lon ? parseFloat(meta.lon) : null,
+      station, stationName: meta.name || stationMeta?.name || null,
+      lat: meta.lat ? parseFloat(meta.lat) : stationMeta?.lat ?? null,
+      lng: meta.lon ? parseFloat(meta.lon) : stationMeta?.lng ?? null,
       product, datum: "MLLW", units: "feet", timeZone: "GMT",
       source: "NOAA Center for Operational Oceanographic Products and Services (CO-OPS)",
     };
