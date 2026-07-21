@@ -1017,6 +1017,13 @@ app.get("/water/streamflow", async (req, res) => {
   }
 });
 
+// Temporary diagnostic (Jul 2026): log unmatched paths to identify 404 traffic source.
+// Grep Render logs for "[404]". Remove the console.log once the investigation is done.
+app.use((req, res) => {
+  console.log(`[404] ${req.method} ${req.originalUrl} ua="${req.get("user-agent") || "-"}" ip=${req.ip}`);
+  res.status(404).json({ error: "Not found. GET / lists all available endpoints." });
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
   console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /world/conflict-news, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow`);
