@@ -428,21 +428,24 @@ app.use(
       },
       "GET /ocean/tides": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "U.S. coastal tide data from NOAA: high/low tide predictions for the next 48 hours (product=predictions, default) or the latest observed water level (product=water_level) at a NOAA CO-OPS station. Heights in feet above MLLW datum, times in GMT. Requires a NOAA station ID (e.g. 9414290 = San Francisco).",
+        description: "U.S. coastal tide data from NOAA: high/low tide predictions for the next 48 hours (product=predictions, default) or the latest observed water level (product=water_level). Identify the location by NOAA CO-OPS station ID, or just pass lat+lng and the nearest station is used automatically (distanceKm in the response says how far it is). Heights in feet above MLLW datum, times in GMT.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
-            input: { station: "9414290", product: "predictions" },
+            input: { lat: "37.7749", lng: "-122.4194", product: "predictions" },
             inputSchema: {
               properties: {
-                station: { type: "string", description: "NOAA CO-OPS station ID (e.g. 9414290 for San Francisco)" },
+                station: { type: "string", description: "NOAA CO-OPS station ID (e.g. 9414290 for San Francisco); omit to resolve by lat/lng instead" },
+                lat: { type: "string", description: "Latitude — used with lng to find the nearest NOAA station when no station ID is given" },
+                lng: { type: "string", description: "Longitude — used with lat to find the nearest NOAA station when no station ID is given" },
                 product: { type: "string", enum: ["predictions", "water_level"], description: "predictions = next 48h high/low tides (default); water_level = latest observed reading" },
               },
-              required: ["station"],
+              required: [],
             },
             output: {
               example: {
                 station: "9414290", stationName: "San Francisco", lat: 37.8063, lng: -122.4659,
+                distanceKm: 6.51,
                 product: "predictions", datum: "MLLW", units: "feet", timeZone: "GMT",
                 tides: [{ time: "2026-07-20 11:43", heightFt: 4.222, type: "H" }],
                 source: "NOAA Center for Operational Oceanographic Products and Services (CO-OPS)",
@@ -451,6 +454,7 @@ app.use(
                 properties: {
                   station: { type: "string" }, stationName: { type: ["string", "null"] },
                   lat: { type: ["number", "null"] }, lng: { type: ["number", "null"] },
+                  distanceKm: { type: "number", description: "Distance from the requested lat/lng to the station used; only present when resolved by lat/lng" },
                   product: { type: "string" }, datum: { type: "string" },
                   units: { type: "string" }, timeZone: { type: "string" },
                   tides: { type: "array" }, source: { type: "string" },
@@ -518,7 +522,7 @@ app.get("/", (req, res) => {
       "GET /world/conflict-news?query=...&limit=10",
       "GET /chain/balance?address=0x...&token=0x... (optional)",
       "GET /treasury/debt",
-      "GET /ocean/tides?station=9414290&product=predictions|water_level (US coastal stations)",
+      "GET /ocean/tides?station=... or lat=...&lng=... (&product=predictions|water_level, US coastal stations)",
       "GET /water/streamflow?site=09380000 (US stream gauges)",
     ],
     price_per_call: PRICE_PER_LOOKUP,
@@ -868,12 +872,61 @@ app.get("/treasury/debt", async (req, res) => {
   }
 });
 
+const NOAA_STATION_TYPE_FOR_PRODUCT = { predictions: "tidepredictions", water_level: "waterlevels" };
+const NOAA_STATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const noaaStationCache = {};
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(a));
+}
+
+async function nearestNoaaStation(product, lat, lng) {
+  const cached = noaaStationCache[product];
+  let stations;
+  if (cached && Date.now() - cached.at < NOAA_STATION_CACHE_TTL_MS) {
+    stations = cached.stations;
+  } else {
+    const { data } = await axios.get("https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json", {
+      params: { type: NOAA_STATION_TYPE_FOR_PRODUCT[product] },
+    });
+    stations = (data?.stations || [])
+      .filter((s) => s.lat != null && s.lng != null)
+      .map((s) => ({ id: s.id, name: s.name, lat: s.lat, lng: s.lng }));
+    noaaStationCache[product] = { at: Date.now(), stations };
+  }
+  let best = null;
+  for (const s of stations) {
+    const distanceKm = haversineKm(lat, lng, s.lat, s.lng);
+    if (!best || distanceKm < best.distanceKm) best = { ...s, distanceKm };
+  }
+  return best;
+}
+
 app.get("/ocean/tides", async (req, res) => {
-  const { station } = req.query;
+  let { station } = req.query;
   const product = req.query.product || "predictions";
-  if (!station) return res.status(400).json({ error: "Missing required query param: station (NOAA CO-OPS station ID, e.g. 9414290)" });
   if (!["predictions", "water_level"].includes(product)) {
     return res.status(400).json({ error: "product must be 'predictions' or 'water_level'" });
+  }
+  let resolved = null;
+  if (!station) {
+    const lat = parseFloat(req.query.lat);
+    const lng = parseFloat(req.query.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.status(400).json({ error: "Provide either 'station' (NOAA CO-OPS station ID, e.g. 9414290), or 'lat' and 'lng' to use the nearest station" });
+    }
+    try {
+      resolved = await nearestNoaaStation(product, lat, lng);
+    } catch (err) {
+      console.error(err.response?.data || err.message);
+      return res.status(502).json({ error: "Could not fetch NOAA station list to resolve nearest station" });
+    }
+    if (!resolved) return res.status(404).json({ error: "No NOAA station found for this product type" });
+    station = resolved.id;
   }
   const baseParams = { station, datum: "MLLW", time_zone: "gmt", units: "english", format: "json" };
   // NOAA's `range` alone counts BACKWARD from now; begin_date makes it count forward
@@ -884,13 +937,16 @@ app.get("/ocean/tides", async (req, res) => {
     ? { ...baseParams, product: "predictions", interval: "hilo", begin_date: beginDate, range: 48 }
     : { ...baseParams, product: "water_level", date: "latest" };
   try {
-    // predictions responses carry no station metadata (water_level does), so fetch it separately
+    // predictions responses carry no station metadata (water_level does), so fetch it
+    // separately — unless nearest-station resolution already gave us the metadata
     const [{ data }, stationMeta] = await Promise.all([
       axios.get("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter", { params }),
-      axios
-        .get(`https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/${encodeURIComponent(station)}.json`)
-        .then((r) => r.data?.stations?.[0] || null)
-        .catch(() => null),
+      resolved
+        ? Promise.resolve(resolved)
+        : axios
+            .get(`https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/${encodeURIComponent(station)}.json`)
+            .then((r) => r.data?.stations?.[0] || null)
+            .catch(() => null),
     ]);
     if (data?.error) return res.status(404).json({ error: data.error.message || "NOAA returned an error for this station" });
     const meta = data?.metadata || {};
@@ -898,6 +954,7 @@ app.get("/ocean/tides", async (req, res) => {
       station, stationName: meta.name || stationMeta?.name || null,
       lat: meta.lat ? parseFloat(meta.lat) : stationMeta?.lat ?? null,
       lng: meta.lon ? parseFloat(meta.lon) : stationMeta?.lng ?? null,
+      ...(resolved ? { distanceKm: Number(resolved.distanceKm.toFixed(2)) } : {}),
       product, datum: "MLLW", units: "feet", timeZone: "GMT",
       source: "NOAA Center for Operational Oceanographic Products and Services (CO-OPS)",
     };
