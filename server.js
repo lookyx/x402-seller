@@ -1275,18 +1275,17 @@ let mcpTools = null;
     mcpTools = MCP_TOOL_DEFS.map(({ path, logic }) => {
       const name = toSnakeCase(ROUTE_META[path].operationId);
       const description = `${PAYMENT_ROUTES[`GET ${path}`].description} Costs ${PRICE_PER_LOOKUP} per call, paid via x402 (USDC on Base).`;
-      const qp = mcpQuerySchema(path);
+      // No bazaar extension here: @x402/mcp's own toolName-extraction requires
+      // resource.url to be a synthetic "mcp://tool/<name>" URI (it strips that
+      // literal prefix to get the name), but CDP's Bazaar rejects any resource
+      // URL — including MCP ones — that isn't https://, logging "MCP server
+      // URL must use HTTPS" on every settlement. The two requirements conflict;
+      // MCP discovery is instead handled correctly via the mcp.remoteConnector
+      // field in /.well-known/x402 (a real https URL), which is what Agent402's
+      // crawler actually reads.
       const paid = createPaymentWrapper(resourceServer, {
         accepts: mcpAccepts,
         resource: { url: `mcp://tool/${name}`, description, mimeType: "application/json", serviceName: "Data Lookup API (x402-seller)" },
-        extensions: {
-          ...declareDiscoveryExtension({
-            toolName: name,
-            description,
-            transport: "streamable-http",
-            inputSchema: { type: "object", properties: qp.properties || {}, required: qp.required || [] },
-          }),
-        },
       });
       const callback = paid(async (args) => {
         try {
