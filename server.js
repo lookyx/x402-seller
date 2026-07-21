@@ -8,6 +8,10 @@ import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { facilitator as cdpFacilitatorConfig } from "@coinbase/x402";
 import { declareDiscoveryExtension, bazaarResourceServerExtension, withBazaar } from "@x402/extensions/bazaar";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createPaymentWrapper } from "@x402/mcp";
+import { z } from "zod";
 
 const PORT = process.env.PORT || 4021;
 const PAY_TO = process.env.PAY_TO_ADDRESS;
@@ -529,7 +533,7 @@ app.get("/", (req, res) => {
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
-    machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402" },
+    machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
     attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
   });
@@ -641,7 +645,11 @@ function buildX402Manifest() {
       payTo: PAY_TO,
       facilitator: USING_CDP ? "CDP" : FACILITATOR_URL,
     },
-    machineReadable: { openapi: `${BASE_URL}/openapi.json` },
+    mcp: {
+      remoteConnector: `${BASE_URL}/mcp`,
+      remoteNote: "Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs $0.001 in USDC on Base, paid in-band via x402 (_meta[\"x402/payment\"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.",
+    },
+    machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
     attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
   };
 }
@@ -659,43 +667,64 @@ app.get("/.well-known/x402", (req, res) => {
   res.json(x402Manifest);
 });
 
-app.get("/geo/lookup", async (req, res) => {
-  const { address } = req.query;
-  if (!address) return res.status(400).json({ error: "Missing required query param: address" });
+// Handlers are factored into plain logic functions (throwing HttpError on failure)
+// so the same code serves both the Express routes and the MCP tools at /mcp.
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function runHandler(res, fn) {
+  try {
+    res.json(await fn());
+  } catch (err) {
+    if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: "Internal error" });
+  }
+}
+
+async function geoLookupLogic({ address }) {
+  if (!address) throw new HttpError(400, "Missing required query param: address");
   try {
     const { data } = await axios.get("https://us1.locationiq.com/v1/search", {
       params: { key: LOCATIONIQ_API_KEY, q: address, format: "json", limit: 1 },
     });
-    if (!data || data.length === 0) return res.status(404).json({ error: "No match found for that address" });
+    if (!data || data.length === 0) throw new HttpError(404, "No match found for that address");
     const { lat, lon, display_name } = data[0];
     const tzMatches = findTimezone(parseFloat(lat), parseFloat(lon));
-    res.json({ query: address, lat: parseFloat(lat), lng: parseFloat(lon), timezone: tzMatches[0] || null, display_name });
+    return { query: address, lat: parseFloat(lat), lng: parseFloat(lon), timezone: tzMatches[0] || null, display_name };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream geocoding lookup failed" });
+    throw new HttpError(502, "Upstream geocoding lookup failed");
   }
-});
+}
+app.get("/geo/lookup", (req, res) => runHandler(res, () => geoLookupLogic(req.query)));
 
-app.get("/geo/reverse", async (req, res) => {
-  const { lat, lng } = req.query;
-  if (!lat || !lng) return res.status(400).json({ error: "Missing required query params: lat, lng" });
+async function geoReverseLogic({ lat, lng }) {
+  if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
   try {
     const { data } = await axios.get("https://us1.locationiq.com/v1/reverse", {
       params: { key: LOCATIONIQ_API_KEY, lat, lon: lng, format: "json" },
     });
     const tzMatches = findTimezone(parseFloat(lat), parseFloat(lng));
-    res.json({ lat: parseFloat(lat), lng: parseFloat(lng), timezone: tzMatches[0] || null, display_name: data?.display_name || null });
+    return { lat: parseFloat(lat), lng: parseFloat(lng), timezone: tzMatches[0] || null, display_name: data?.display_name || null };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream reverse geocoding lookup failed" });
+    throw new HttpError(502, "Upstream reverse geocoding lookup failed");
   }
-});
+}
+app.get("/geo/reverse", (req, res) => runHandler(res, () => geoReverseLogic(req.query)));
 
-app.get("/oil/price", async (req, res) => {
-  const benchmarkParam = (req.query.benchmark || "wti").toLowerCase();
+async function oilPriceLogic({ benchmark }) {
+  const benchmarkParam = (benchmark || "wti").toLowerCase();
   const seriesMap = { wti: { code: "RWTC", label: "WTI" }, brent: { code: "RBRTE", label: "Brent" } };
   const chosen = seriesMap[benchmarkParam];
-  if (!chosen) return res.status(400).json({ error: "benchmark must be 'wti' or 'brent'" });
+  if (!chosen) throw new HttpError(400, "benchmark must be 'wti' or 'brent'");
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/petroleum/pri/spt/data", {
       params: {
@@ -704,16 +733,18 @@ app.get("/oil/price", async (req, res) => {
       },
     });
     const points = data?.response?.data || [];
-    if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
+    if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
-    res.json({ benchmark: chosen.label, price: latest.value != null ? parseFloat(latest.value) : null, unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" });
+    return { benchmark: chosen.label, price: latest.value != null ? parseFloat(latest.value) : null, unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream EIA lookup failed" });
+    throw new HttpError(502, "Upstream EIA lookup failed");
   }
-});
+}
+app.get("/oil/price", (req, res) => runHandler(res, () => oilPriceLogic(req.query)));
 
-app.get("/gas/price", async (req, res) => {
+async function gasPriceLogic() {
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/natural-gas/pri/fut/data", {
       params: {
@@ -722,17 +753,19 @@ app.get("/gas/price", async (req, res) => {
       },
     });
     const points = data?.response?.data || [];
-    if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
+    if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
-    res.json({ benchmark: "Henry Hub", price: latest.value != null ? parseFloat(latest.value) : null, unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" });
+    return { benchmark: "Henry Hub", price: latest.value != null ? parseFloat(latest.value) : null, unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream EIA lookup failed" });
+    throw new HttpError(502, "Upstream EIA lookup failed");
   }
-});
+}
+app.get("/gas/price", (req, res) => runHandler(res, () => gasPriceLogic(req.query)));
 
-app.get("/electricity/price", async (req, res) => {
-  const state = (req.query.state || "US").toUpperCase();
+async function electricityPriceLogic(args) {
+  const state = (args.state || "US").toUpperCase();
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/electricity/retail-sales/data", {
       params: {
@@ -742,42 +775,45 @@ app.get("/electricity/price", async (req, res) => {
       },
     });
     const points = data?.response?.data || [];
-    if (points.length === 0) return res.status(404).json({ error: `No data found for state '${state}'` });
+    if (points.length === 0) throw new HttpError(404, `No data found for state '${state}'`);
     const latest = points[0];
-    res.json({ region: latest.stateDescription || state, price: latest.price, unit: "cents per kilowatt-hour", date: latest.period, source: "U.S. Energy Information Administration (EIA)" });
+    return { region: latest.stateDescription || state, price: latest.price, unit: "cents per kilowatt-hour", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream EIA lookup failed" });
+    throw new HttpError(502, "Upstream EIA lookup failed");
   }
-});
+}
+app.get("/electricity/price", (req, res) => runHandler(res, () => electricityPriceLogic(req.query)));
 
-app.get("/weather/forecast", async (req, res) => {
-  const { lat, lng } = req.query;
-  if (!lat || !lng) return res.status(400).json({ error: "Missing required query params: lat, lng" });
+async function weatherForecastLogic({ lat, lng }) {
+  if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
   try {
     const pointsResp = await axios.get(`https://api.weather.gov/points/${lat},${lng}`, {
       headers: { "User-Agent": NWS_USER_AGENT },
     });
     const forecastUrl = pointsResp.data?.properties?.forecast;
     const gridId = pointsResp.data?.properties?.gridId;
-    if (!forecastUrl) return res.status(502).json({ error: "Could not resolve forecast URL for this location" });
+    if (!forecastUrl) throw new HttpError(502, "Could not resolve forecast URL for this location");
     const forecastResp = await axios.get(forecastUrl, { headers: { "User-Agent": NWS_USER_AGENT } });
     const period = forecastResp.data?.properties?.periods?.[0];
-    if (!period) return res.status(502).json({ error: "No forecast data available for this location" });
-    res.json({
+    if (!period) throw new HttpError(502, "No forecast data available for this location");
+    return {
       location: gridId || null, period: period.name, temperature: period.temperature,
       temperatureUnit: period.temperatureUnit, shortForecast: period.shortForecast,
       detailedForecast: period.detailedForecast, windSpeed: period.windSpeed,
       windDirection: period.windDirection, source: "National Weather Service (NOAA)",
-    });
+    };
   } catch (err) {
-    if (err.response?.status === 404) return res.status(404).json({ error: "Location outside NWS coverage (US only)" });
+    if (err instanceof HttpError) throw err;
+    if (err.response?.status === 404) throw new HttpError(404, "Location outside NWS coverage (US only)");
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream NWS lookup failed" });
+    throw new HttpError(502, "Upstream NWS lookup failed");
   }
-});
+}
+app.get("/weather/forecast", (req, res) => runHandler(res, () => weatherForecastLogic(req.query)));
 
-app.get("/nuclear/outages", async (req, res) => {
+async function nuclearOutagesLogic() {
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/nuclear-outages/us-nuclear-outages/data", {
       params: {
@@ -787,21 +823,23 @@ app.get("/nuclear/outages", async (req, res) => {
       },
     });
     const points = data?.response?.data || [];
-    if (points.length === 0) return res.status(502).json({ error: "No data returned from EIA" });
+    if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
-    res.json({
+    return {
       date: latest.period, capacityMw: latest.capacity, outageMw: latest.outage,
       percentOutage: latest.percentOutage, source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission",
-    });
+    };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream EIA lookup failed" });
+    throw new HttpError(502, "Upstream EIA lookup failed");
   }
-});
+}
+app.get("/nuclear/outages", (req, res) => runHandler(res, () => nuclearOutagesLogic(req.query)));
 
-app.get("/earthquakes/recent", async (req, res) => {
-  const minmagnitude = req.query.minmagnitude || "4.5";
-  const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
+async function earthquakesRecentLogic(args) {
+  const minmagnitude = args.minmagnitude || "4.5";
+  const limit = Math.min(parseInt(args.limit, 10) || 10, 50);
   const endtime = new Date();
   const starttime = new Date(endtime.getTime() - 7 * 24 * 60 * 60 * 1000);
   try {
@@ -810,63 +848,69 @@ app.get("/earthquakes/recent", async (req, res) => {
     });
     const features = data?.features || [];
     const earthquakes = features.map((f) => ({
-      place: f.properties.place, magnitude: f.properties.mag, time: new Date(f.properties.time).toISOString(),
+      place: f.properties?.place ?? null, magnitude: f.properties?.mag ?? null,
+      time: f.properties?.time ? new Date(f.properties.time).toISOString() : null,
       depthKm: f.geometry?.coordinates?.[2] ?? null, lat: f.geometry?.coordinates?.[1] ?? null,
-      lng: f.geometry?.coordinates?.[0] ?? null, url: f.properties.url,
+      lng: f.geometry?.coordinates?.[0] ?? null, url: f.properties?.url ?? null,
     }));
-    res.json({ count: earthquakes.length, earthquakes, source: "U.S. Geological Survey (USGS)" });
+    return { count: earthquakes.length, earthquakes, source: "U.S. Geological Survey (USGS)" };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream USGS lookup failed" });
+    throw new HttpError(502, "Upstream USGS lookup failed");
   }
-});
+}
+app.get("/earthquakes/recent", (req, res) => runHandler(res, () => earthquakesRecentLogic(req.query)));
 
-app.get("/currency/rate", async (req, res) => {
-  const from = (req.query.from || "EUR").toUpperCase();
-  const to = (req.query.to || "USD").toUpperCase();
+async function currencyRateLogic(args) {
+  const from = (args.from || "EUR").toUpperCase();
+  const to = (args.to || "USD").toUpperCase();
   try {
     const { data: xml } = await axios.get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml");
     const parsed = xmlParser.parse(xml);
     const dayCube = parsed["gesmes:Envelope"]?.Cube?.Cube;
     const date = dayCube?.time;
     const rateEntries = dayCube?.Cube;
-    const rateList = Array.isArray(rateEntries) ? rateEntries : [rateEntries];
+    const rateList = (Array.isArray(rateEntries) ? rateEntries : [rateEntries]).filter(Boolean);
     const rates = { EUR: 1 };
     for (const entry of rateList) rates[entry.currency] = parseFloat(entry.rate);
-    if (!(from in rates)) return res.status(400).json({ error: `Unknown currency code: ${from}` });
-    if (!(to in rates)) return res.status(400).json({ error: `Unknown currency code: ${to}` });
+    if (!(from in rates)) throw new HttpError(400, `Unknown currency code: ${from}`);
+    if (!(to in rates)) throw new HttpError(400, `Unknown currency code: ${to}`);
     const rate = rates[to] / rates[from];
-    res.json({ from, to, rate: Number(rate.toFixed(6)), date, source: "European Central Bank (ECB)" });
+    return { from, to, rate: Number(rate.toFixed(6)), date, source: "European Central Bank (ECB)" };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream ECB lookup failed" });
+    throw new HttpError(502, "Upstream ECB lookup failed");
   }
-});
+}
+app.get("/currency/rate", (req, res) => runHandler(res, () => currencyRateLogic(req.query)));
 
-app.get("/air/quality", async (req, res) => {
-  const { lat, lng } = req.query;
-  if (!lat || !lng) return res.status(400).json({ error: "Missing required query params: lat, lng" });
+async function airQualityLogic({ lat, lng }) {
+  if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
   try {
     const { data } = await axios.get("https://www.airnowapi.org/aq/observation/latLong/current/", {
       params: { format: "application/json", latitude: lat, longitude: lng, distance: 25, API_KEY: AIRNOW_API_KEY },
     });
-    if (!Array.isArray(data) || data.length === 0) return res.status(404).json({ error: "No air quality data available near this location" });
+    if (!Array.isArray(data) || data.length === 0) throw new HttpError(404, "No air quality data available near this location");
     const first = data[0];
     const readings = data.map((r) => ({ pollutant: r.ParameterName, aqi: r.AQI, category: r.Category?.Name }));
-    res.json({
+    return {
       reportingArea: first.ReportingArea, stateCode: first.StateCode,
       date: first.DateObserved?.trim(), hour: first.HourObserved, readings, preliminary: true,
       attribution: "Data owned by federal, state, local, and tribal air quality agencies, distributed via the U.S. EPA AirNow program. Preliminary, unvalidated data — not for regulatory use.",
       source: "U.S. EPA AirNow",
-    });
+    };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream AirNow lookup failed" });
+    throw new HttpError(502, "Upstream AirNow lookup failed");
   }
-});
+}
+app.get("/air/quality", (req, res) => runHandler(res, () => airQualityLogic(req.query)));
 
-app.get("/space/asteroids", async (req, res) => {
-  const date = req.query.date || new Date().toISOString().slice(0, 10);
+async function spaceAsteroidsLogic(args) {
+  const date = args.date || new Date().toISOString().slice(0, 10);
   try {
     const { data } = await axios.get("https://api.nasa.gov/neo/rest/v1/feed", {
       params: { start_date: date, end_date: date, api_key: NASA_API_KEY },
@@ -879,17 +923,19 @@ app.get("/space/asteroids", async (req, res) => {
           name: neo.name, hazardous: neo.is_potentially_hazardous_asteroid,
           diameterKmMin: neo.estimated_diameter?.kilometers?.estimated_diameter_min ?? null,
           diameterKmMax: neo.estimated_diameter?.kilometers?.estimated_diameter_max ?? null,
-          velocityKph: approach ? parseFloat(approach.relative_velocity.kilometers_per_hour) : null,
-          missDistanceKm: approach ? parseFloat(approach.miss_distance.kilometers) : null,
+          velocityKph: approach?.relative_velocity?.kilometers_per_hour ? parseFloat(approach.relative_velocity.kilometers_per_hour) : null,
+          missDistanceKm: approach?.miss_distance?.kilometers ? parseFloat(approach.miss_distance.kilometers) : null,
         };
       })
       .sort((a, b) => (a.missDistanceKm ?? Infinity) - (b.missDistanceKm ?? Infinity));
-    res.json({ date, count: asteroids.length, asteroids, source: "NASA JPL Near Earth Object Web Service (NeoWs)" });
+    return { date, count: asteroids.length, asteroids, source: "NASA JPL Near Earth Object Web Service (NeoWs)" };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream NASA lookup failed" });
+    throw new HttpError(502, "Upstream NASA lookup failed");
   }
-});
+}
+app.get("/space/asteroids", (req, res) => runHandler(res, () => spaceAsteroidsLogic(req.query)));
 
 async function fetchGdeltWithRetry(params, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
@@ -907,10 +953,10 @@ async function fetchGdeltWithRetry(params, attempts = 3) {
   }
 }
 
-app.get("/world/conflict-news", async (req, res) => {
-  const query = req.query.query;
-  if (!query) return res.status(400).json({ error: "Missing required query param: query" });
-  const limit = Math.min(parseInt(req.query.limit, 10) || 10, 25);
+async function worldConflictNewsLogic(args) {
+  const query = args.query;
+  if (!query) throw new HttpError(400, "Missing required query param: query");
+  const limit = Math.min(parseInt(args.limit, 10) || 10, 25);
   try {
     const data = await fetchGdeltWithRetry({
       query, mode: "ArtList", format: "json", maxrecords: limit, sort: "datedesc", timespan: "3d",
@@ -918,12 +964,14 @@ app.get("/world/conflict-news", async (req, res) => {
     const articles = (data?.articles || []).map((a) => ({
       title: a.title, url: a.url, domain: a.domain, sourceCountry: a.sourcecountry, publishedDate: a.seendate,
     }));
-    res.json({ query, count: articles.length, articles, source: "GDELT Project (global news monitoring)" });
+    return { query, count: articles.length, articles, source: "GDELT Project (global news monitoring)" };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(503).json({ error: "GDELT is currently rate-limiting this server. Please try again shortly." });
+    throw new HttpError(503, "GDELT is currently rate-limiting this server. Please try again shortly.");
   }
-});
+}
+app.get("/world/conflict-news", (req, res) => runHandler(res, () => worldConflictNewsLogic(req.query)));
 
 async function baseRpcCall(method, params, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
@@ -940,21 +988,19 @@ async function baseRpcCall(method, params, attempts = 3) {
   }
 }
 
-app.get("/chain/balance", async (req, res) => {
-  const { address, token } = req.query;
+async function chainBalanceLogic({ address, token }) {
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
-    return res.status(400).json({ error: "Missing or invalid 'address' query param (expected 0x... format)" });
+    throw new HttpError(400, "Missing or invalid 'address' query param (expected 0x... format)");
   }
-
+  if (token && !/^0x[a-fA-F0-9]{40}$/.test(token)) {
+    throw new HttpError(400, "Invalid 'token' query param (expected 0x... format)");
+  }
   try {
     const ethBalanceHex = await baseRpcCall("eth_getBalance", [address, "latest"]);
     const ethBalance = Number(BigInt(ethBalanceHex)) / 1e18;
 
     let tokenResult = null;
     if (token) {
-      if (!/^0x[a-fA-F0-9]{40}$/.test(token)) {
-        return res.status(400).json({ error: "Invalid 'token' query param (expected 0x... format)" });
-      }
       const paddedAddress = address.slice(2).toLowerCase().padStart(64, "0");
       const balanceHex = await baseRpcCall("eth_call", [{ to: token, data: `0x70a08231${paddedAddress}` }, "latest"]);
       const decimalsHex = await baseRpcCall("eth_call", [{ to: token, data: "0x313ce567" }, "latest"]);
@@ -967,34 +1013,37 @@ app.get("/chain/balance", async (req, res) => {
       };
     }
 
-    res.json({ address, network: "base", ethBalance, token: tokenResult, source: "Base mainnet public RPC" });
+    return { address, network: "base", ethBalance, token: tokenResult, source: "Base mainnet public RPC" };
   } catch (err) {
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream Base RPC lookup failed" });
+    throw new HttpError(502, "Upstream Base RPC lookup failed");
   }
-});
+}
+app.get("/chain/balance", (req, res) => runHandler(res, () => chainBalanceLogic(req.query)));
 
-app.get("/treasury/debt", async (req, res) => {
+async function treasuryDebtLogic() {
   try {
     const { data } = await axios.get(
       "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/debt_to_penny",
       { params: { sort: "-record_date", "page[size]": 1 } }
     );
     const latest = data?.data?.[0];
-    if (!latest) return res.status(502).json({ error: "No data returned from Treasury Fiscal Data" });
-    res.json({
+    if (!latest) throw new HttpError(502, "No data returned from Treasury Fiscal Data");
+    return {
       date: latest.record_date,
       totalDebt: parseFloat(latest.tot_pub_debt_out_amt),
       debtHeldByPublic: parseFloat(latest.debt_held_public_amt),
       intragovernmentalHoldings: parseFloat(latest.intragov_hold_amt),
       unit: "US dollars",
       source: "U.S. Department of the Treasury, Fiscal Data (Debt to the Penny)",
-    });
+    };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream Treasury Fiscal Data lookup failed" });
+    throw new HttpError(502, "Upstream Treasury Fiscal Data lookup failed");
   }
-});
+}
+app.get("/treasury/debt", (req, res) => runHandler(res, () => treasuryDebtLogic(req.query)));
 
 const NOAA_STATION_TYPE_FOR_PRODUCT = { predictions: "tidepredictions", water_level: "waterlevels" };
 const NOAA_STATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -1030,26 +1079,26 @@ async function nearestNoaaStation(product, lat, lng) {
   return best;
 }
 
-app.get("/ocean/tides", async (req, res) => {
-  let { station } = req.query;
-  const product = req.query.product || "predictions";
+async function oceanTidesLogic(args) {
+  let { station } = args;
+  const product = (args.product || "predictions").toLowerCase();
   if (!["predictions", "water_level"].includes(product)) {
-    return res.status(400).json({ error: "product must be 'predictions' or 'water_level'" });
+    throw new HttpError(400, "product must be 'predictions' or 'water_level'");
   }
   let resolved = null;
   if (!station) {
-    const lat = parseFloat(req.query.lat);
-    const lng = parseFloat(req.query.lng);
+    const lat = parseFloat(args.lat);
+    const lng = parseFloat(args.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      return res.status(400).json({ error: "Provide either 'station' (NOAA CO-OPS station ID, e.g. 9414290), or 'lat' and 'lng' to use the nearest station" });
+      throw new HttpError(400, "Provide either 'station' (NOAA CO-OPS station ID, e.g. 9414290), or 'lat' and 'lng' to use the nearest station");
     }
     try {
       resolved = await nearestNoaaStation(product, lat, lng);
     } catch (err) {
       console.error(err.response?.data || err.message);
-      return res.status(502).json({ error: "Could not fetch NOAA station list to resolve nearest station" });
+      throw new HttpError(502, "Could not fetch NOAA station list to resolve nearest station");
     }
-    if (!resolved) return res.status(404).json({ error: "No NOAA station found for this product type" });
+    if (!resolved) throw new HttpError(404, "No NOAA station found for this product type");
     station = resolved.id;
   }
   const baseParams = { station, datum: "MLLW", time_zone: "gmt", units: "english", format: "json" };
@@ -1072,7 +1121,7 @@ app.get("/ocean/tides", async (req, res) => {
             .then((r) => r.data?.stations?.[0] || null)
             .catch(() => null),
     ]);
-    if (data?.error) return res.status(404).json({ error: data.error.message || "NOAA returned an error for this station" });
+    if (data?.error) throw new HttpError(404, data.error.message || "NOAA returned an error for this station");
     const meta = data?.metadata || {};
     const common = {
       station, stationName: meta.name || stationMeta?.name || null,
@@ -1084,31 +1133,32 @@ app.get("/ocean/tides", async (req, res) => {
     };
     if (product === "predictions") {
       const tides = (data?.predictions || []).map((p) => ({ time: p.t, heightFt: parseFloat(p.v), type: p.type }));
-      if (tides.length === 0) return res.status(404).json({ error: "No tide predictions available for this station" });
-      return res.json({ ...common, tides });
+      if (tides.length === 0) throw new HttpError(404, "No tide predictions available for this station");
+      return { ...common, tides };
     }
     const obs = data?.data?.[0];
-    if (!obs) return res.status(404).json({ error: "No water level observation available for this station" });
-    res.json({ ...common, time: obs.t, heightFt: parseFloat(obs.v), preliminary: obs.q === "p" });
+    if (!obs) throw new HttpError(404, "No water level observation available for this station");
+    return { ...common, time: obs.t, heightFt: parseFloat(obs.v), preliminary: obs.q === "p" };
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     const noaaMessage = err.response?.data?.error?.message;
     if (err.response?.status === 400 && noaaMessage) {
-      return res.status(404).json({ error: noaaMessage.trim() });
+      throw new HttpError(404, noaaMessage.trim());
     }
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream NOAA CO-OPS lookup failed" });
+    throw new HttpError(502, "Upstream NOAA CO-OPS lookup failed");
   }
-});
+}
+app.get("/ocean/tides", (req, res) => runHandler(res, () => oceanTidesLogic(req.query)));
 
-app.get("/water/streamflow", async (req, res) => {
-  const { site } = req.query;
-  if (!site) return res.status(400).json({ error: "Missing required query param: site (USGS site number, e.g. 09380000)" });
+async function waterStreamflowLogic({ site }) {
+  if (!site) throw new HttpError(400, "Missing required query param: site (USGS site number, e.g. 09380000)");
   try {
     const { data } = await axios.get("https://waterservices.usgs.gov/nwis/iv/", {
       params: { format: "json", sites: site, parameterCd: "00060,00065", siteStatus: "all" },
     });
     const seriesList = data?.value?.timeSeries || [];
-    if (seriesList.length === 0) return res.status(404).json({ error: `No data found for USGS site '${site}'` });
+    if (seriesList.length === 0) throw new HttpError(404, `No data found for USGS site '${site}'`);
     const result = {
       site, siteName: null, lat: null, lng: null,
       streamflowCfs: null, gaugeHeightFt: null, time: null,
@@ -1132,14 +1182,199 @@ app.get("/water/streamflow", async (req, res) => {
       if (code === "00065") result.gaugeHeightFt = numValue;
     }
     if (result.streamflowCfs === null && result.gaugeHeightFt === null) {
-      return res.status(404).json({ error: `Site '${site}' exists but reports no current streamflow or gauge height data` });
+      throw new HttpError(404, `Site '${site}' exists but reports no current streamflow or gauge height data`);
     }
-    res.json(result);
+    return result;
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
-    res.status(502).json({ error: "Upstream USGS lookup failed" });
+    throw new HttpError(502, "Upstream USGS lookup failed");
+  }
+}
+app.get("/water/streamflow", (req, res) => runHandler(res, () => waterStreamflowLogic(req.query)));
+
+// ---- MCP endpoint (POST /mcp) — the same 16 tools, payable in-band via x402 ----
+// Stateless Streamable HTTP: initialize and tools/list are free; each tools/call is
+// wrapped by @x402/mcp — unpaid calls get the payment requirements as a structured
+// result, x402-aware clients retry with _meta["x402/payment"] and get data + receipt.
+
+const MCP_TOOL_DEFS = [
+  { path: "/geo/lookup", logic: geoLookupLogic },
+  { path: "/geo/reverse", logic: geoReverseLogic },
+  { path: "/oil/price", logic: oilPriceLogic },
+  { path: "/gas/price", logic: gasPriceLogic },
+  { path: "/electricity/price", logic: electricityPriceLogic },
+  { path: "/weather/forecast", logic: weatherForecastLogic },
+  { path: "/nuclear/outages", logic: nuclearOutagesLogic },
+  { path: "/earthquakes/recent", logic: earthquakesRecentLogic },
+  { path: "/currency/rate", logic: currencyRateLogic },
+  { path: "/air/quality", logic: airQualityLogic },
+  { path: "/space/asteroids", logic: spaceAsteroidsLogic },
+  { path: "/world/conflict-news", logic: worldConflictNewsLogic },
+  { path: "/chain/balance", logic: chainBalanceLogic },
+  { path: "/treasury/debt", logic: treasuryDebtLogic },
+  { path: "/ocean/tides", logic: oceanTidesLogic },
+  { path: "/water/streamflow", logic: waterStreamflowLogic },
+];
+
+const toSnakeCase = (s) => s.replace(/([A-Z])/g, "_$1").toLowerCase();
+
+function mcpQuerySchema(path) {
+  return PAYMENT_ROUTES[`GET ${path}`]?.extensions?.bazaar?.schema?.properties?.input?.properties?.queryParams || {};
+}
+
+// The MCP SDK requires zod schemas; derive them from the same bazaar JSON schemas
+// that feed the payment middleware and OpenAPI doc so tool inputs cannot drift.
+// Two normalizations vs. a literal translation of the JSON schema:
+// - numeric-looking params accept a JSON number too (MCP callers naturally send
+//   {lat: 38.8} rather than {lat: "38.8"}) and are coerced to the string the
+//   logic functions expect, since HTTP query params are always strings
+// - enum values are lowercased before validation so MCP callers aren't held to
+//   a stricter case convention than the HTTP query-string routes
+function zodShapeFor(path) {
+  const qp = mcpQuerySchema(path);
+  const required = qp.required || [];
+  const shape = {};
+  for (const [name, schema] of Object.entries(qp.properties || {})) {
+    let s = schema.enum
+      ? z.preprocess((v) => (typeof v === "string" ? v.toLowerCase() : v), z.enum(schema.enum))
+      : z.union([z.string(), z.number()]).transform((v) => String(v));
+    if (schema.description) s = s.describe(schema.description);
+    if (!required.includes(name)) s = s.optional();
+    shape[name] = s;
+  }
+  return shape;
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+let mcpTools = null;
+// Runs in the background — deliberately NOT awaited before app.listen() below.
+// paymentMiddleware() (see its call further up) already triggers this same
+// resourceServer's facilitator initialization on first use; calling it again
+// here is redundant but harmless (initialize() just repopulates its internal
+// maps from a fresh /supported fetch — no shared mutable state gets corrupted
+// by two calls in flight). What matters is that neither call is allowed to
+// block the HTTP server from binding its port: a facilitator that's merely
+// slow (not just erroring) must only leave mcpTools null (/mcp returns 503),
+// never delay or prevent the 16 already-working paid HTTP routes from serving.
+(async () => {
+  try {
+    await withTimeout(resourceServer.initialize(), 10_000, "resourceServer.initialize()");
+    const mcpAccepts = await withTimeout(
+      resourceServer.buildPaymentRequirements({ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: PRICE_PER_LOOKUP }),
+      10_000,
+      "buildPaymentRequirements()"
+    );
+    mcpTools = MCP_TOOL_DEFS.map(({ path, logic }) => {
+      const name = toSnakeCase(ROUTE_META[path].operationId);
+      const description = `${PAYMENT_ROUTES[`GET ${path}`].description} Costs ${PRICE_PER_LOOKUP} per call, paid via x402 (USDC on Base).`;
+      const qp = mcpQuerySchema(path);
+      const paid = createPaymentWrapper(resourceServer, {
+        accepts: mcpAccepts,
+        resource: { url: `mcp://tool/${name}`, description, mimeType: "application/json", serviceName: "Data Lookup API (x402-seller)" },
+        extensions: {
+          ...declareDiscoveryExtension({
+            toolName: name,
+            description,
+            transport: "streamable-http",
+            inputSchema: { type: "object", properties: qp.properties || {}, required: qp.required || [] },
+          }),
+        },
+      });
+      const callback = paid(async (args) => {
+        try {
+          const data = await logic(args || {});
+          return { content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data };
+        } catch (err) {
+          const message = err instanceof HttpError ? err.message : "Internal error";
+          if (!(err instanceof HttpError)) console.error(err.response?.data || err.message);
+          // isError results cancel settlement — buyers are not charged for failed lookups
+          return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
+        }
+      });
+      return { name, description, inputSchema: zodShapeFor(path), callback };
+    });
+    console.log(`   MCP: ${mcpTools.length} paid tools available at POST /mcp`);
+  } catch (err) {
+    console.error("MCP payment setup failed — /mcp disabled:", err.message);
+  }
+})();
+
+// Stateless mode requires a fresh server per request (shared instances collide)
+function buildMcpServer() {
+  const mcp = new McpServer({ name: "x402-seller-data-api", version: DEPLOY_VERSION });
+  for (const t of mcpTools) {
+    mcp.registerTool(t.name, { description: t.description, inputSchema: t.inputSchema }, t.callback);
+  }
+  return mcp;
+}
+
+// Unauthenticated public endpoint — cheap per-IP rate limit.
+// Express's trust-proxy-derived req.ip picks the RIGHTMOST X-Forwarded-For
+// entry, which is attacker-controlled if the client sends its own XFF header
+// and Render's edge only appends (rather than replaces) that header. Render
+// places the real client IP FIRST, so read that entry directly instead.
+function mcpClientIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) return xff.split(",")[0].trim();
+  return req.socket.remoteAddress || "unknown";
+}
+
+const mcpRateWindow = new Map();
+function mcpRateLimited(ip) {
+  const now = Date.now();
+  const entry = mcpRateWindow.get(ip);
+  if (!entry || now - entry.start > 60_000) {
+    if (mcpRateWindow.size > 10_000) mcpRateWindow.clear();
+    mcpRateWindow.set(ip, { start: now, count: 1 });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > 120;
+}
+
+app.use("/mcp", (req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID");
+  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
+});
+
+app.post("/mcp", express.json(), async (req, res) => {
+  if (!mcpTools) {
+    return res.status(503).json({ jsonrpc: "2.0", error: { code: -32000, message: "MCP endpoint unavailable: payment setup failed at boot" }, id: null });
+  }
+  if (mcpRateLimited(mcpClientIp(req))) {
+    return res.status(429).json({ jsonrpc: "2.0", error: { code: -32000, message: "Rate limit exceeded" }, id: null });
+  }
+  const mcp = buildMcpServer();
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  res.on("close", () => { try { transport.close(); mcp.close(); } catch {} });
+  try {
+    await mcp.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error("MCP request error:", err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
+    }
   }
 });
+
+const mcpStatelessHint = (req, res) => res.status(405).set("Allow", "POST").json({
+  jsonrpc: "2.0", error: { code: -32000, message: "This MCP endpoint is stateless: POST JSON-RPC messages to /mcp." }, id: null,
+});
+app.get("/mcp", mcpStatelessHint);
+app.delete("/mcp", mcpStatelessHint);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found. GET / lists all available endpoints." });

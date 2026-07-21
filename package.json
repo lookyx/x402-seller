@@ -10,16 +10,19 @@
   },
   "dependencies": {
     "@coinbase/x402": "^2.1.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.18.0",
     "@x402/express": "^2.0.0",
     "@x402/extensions": "^2.18.0",
     "@x402/fetch": "^2.18.0",
+    "@x402/mcp": "^2.19.0",
     "axios": "^1.7.9",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "fast-xml-parser": "^5.10.1",
     "geo-tz": "^8.1.1",
-    "viem": "^2.55.2"
+    "viem": "^2.55.2",
+    "zod": "^4.4.3"
   }
 }
