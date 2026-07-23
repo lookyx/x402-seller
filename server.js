@@ -51,7 +51,7 @@ const PRICE_PER_LOOKUP = "$0.001";
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Forward geocode a free-text address into latitude, longitude, and IANA timezone.",
+        description: "Forward geocode a free-text address, place name, or city (e.g. \"Tokyo, Japan\") into geographic coordinates — latitude and longitude — plus its IANA timezone. Use this to convert a location description into coordinates for mapping, distance, or timezone-aware lookups, or as the first step before coordinate-based endpoints like weather forecasts.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -74,7 +74,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /geo/reverse": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Reverse geocode latitude/longitude coordinates into a place name and IANA timezone.",
+        description: "Reverse geocode GPS coordinates (latitude/longitude) into a place name/address and IANA timezone.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -100,7 +100,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /oil/price": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Latest official daily spot price for WTI or Brent crude oil (USD/barrel), sourced from the U.S. Energy Information Administration. Data lags several business days behind the market; not live trading data.",
+        description: "Current crude oil price in USD per barrel — WTI or Brent spot price from the U.S. Energy Information Administration (EIA). Reflects the latest official daily figure, not live or real-time trading data; lags the market by several business days.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -143,7 +143,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /electricity/price": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Latest average U.S. retail electricity price (cents/kWh), monthly data across all sectors, sourced from the U.S. Energy Information Administration. Optional 'state' param (2-letter code) for a specific state instead of the national average.",
+        description: "Current average retail price of electricity in the U.S., in cents per kilowatt-hour (cents/kWh) — matches queries like \"what's the electricity price right now\", \"how much does power cost per kWh\", \"electricity rates by state\". Reflects the latest monthly data (not real-time), averaged across all sectors combined (residential, commercial, industrial, etc. — not sector-specific), sourced from the U.S. Energy Information Administration (EIA). Optional 'state' param (2-letter code, e.g. 'TX') returns that state's average instead of the national figure.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -166,7 +166,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /weather/forecast": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Official U.S. National Weather Service forecast (next period) for given coordinates. US locations only. Use /geo/lookup first if you only have an address.",
+        description: "Official U.S. National Weather Service (NWS) forecast for the next period — the nearest upcoming forecast window, e.g. today, tonight, or tomorrow — at a given latitude/longitude. US locations only. Use /geo/lookup first if you only have an address.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -198,7 +198,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /nuclear/outages": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Latest daily U.S. nuclear power plant outage data: total capacity, megawatts offline, and percent outage nationwide. Sourced from the U.S. Nuclear Regulatory Commission via EIA.",
+        description: "Current U.S. nuclear power outage levels, updated daily: nationwide total generating capacity, megawatts offline, and percent outage. Aggregate figure for the whole U.S. reactor fleet, not broken out by individual plant or reactor. Sourced from the U.S. Nuclear Regulatory Commission via EIA.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -218,7 +218,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /earthquakes/recent": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Recent significant earthquakes worldwide from the past 7 days, sourced from USGS. Optional 'minmagnitude' (default 4.5) and 'limit' (default 10, max 50).",
+        description: "Check for recent significant earthquakes, quakes, or seismic activity anywhere in the world, from the past 7 days, sourced from USGS (US Geological Survey). Answers questions like \"was there an earthquake near me\", \"how strong was the recent quake in X\", or \"list major earthquakes this week\". Optional 'minmagnitude' filters by minimum magnitude (default 4.5), and 'limit' caps the number of results (default 10, max 50).",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -243,7 +243,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /currency/rate": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Official daily currency exchange rate between any two currencies (30+ major currencies), sourced from the European Central Bank. Updates once per business day (~16:00 CET), not live/intraday.",
+        description: "Currency exchange rate for converting between any two currencies (forex/FX rate), drawn from a set of 30+ major currencies, sourced from the European Central Bank's official daily reference rates. Updates once per business day (~16:00 CET) — not a live or intraday feed.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -269,7 +269,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /air/quality": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Current U.S. air quality index (AQI) readings near given coordinates, sourced from the EPA AirNow program (federal/state/local/tribal agencies). Data is preliminary and unvalidated per EPA data use guidelines — not for regulatory use. US/Canada/Mexico coverage only.",
+        description: "Current U.S. EPA Air Quality Index (AQI) and pollution levels for a specific location, given latitude/longitude — use to check smog, air pollution, or whether it's safe to be outside. Sourced from the EPA AirNow program (federal/state/local/tribal agencies); covers the US, Canada, and Mexico only. Data is preliminary and unvalidated per EPA data use guidelines — not for regulatory use.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -303,7 +303,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /space/asteroids": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Near-Earth asteroids making their closest approach on a given date (default today), sorted by distance. Includes size, velocity, and miss distance. Sourced from NASA JPL's Near Earth Object Web Service.",
+        description: "Near-Earth asteroids (NEOs) making their closest approach to Earth on a given date (default: today), sorted by distance -- also called close-approach or flyby data. Includes each asteroid's estimated size, relative velocity, and miss distance. Sourced from NASA JPL's Near Earth Object Web Service (NeoWs).",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -335,7 +335,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /chain/balance": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Live wallet balance on Base mainnet: native ETH plus an optional ERC20 token balance. Sourced from Base's official public RPC.",
+        description: "Check a wallet's live balance on Base mainnet: native ETH (e.g. to confirm it has enough for gas) plus an optional ERC20 token balance (e.g. USDC) when a token contract address is supplied. Sourced from Base's official public RPC.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -368,7 +368,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /treasury/debt": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Latest total U.S. national debt outstanding ('Debt to the Penny'): total public debt, debt held by the public, and intragovernmental holdings. Updated each business day by the U.S. Treasury.",
+        description: "Current total U.S. national debt outstanding — how much the U.S. government owes right now — from the Treasury's 'Debt to the Penny' data: total public debt outstanding, debt held by the public, and intragovernmental holdings. Updated each business day by the U.S. Treasury.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -393,7 +393,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /ocean/tides": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "U.S. coastal tide data from NOAA: high/low tide predictions for the next 48 hours (product=predictions, default) or the latest observed water level (product=water_level). Identify the location by NOAA CO-OPS station ID, or just pass lat+lng and the nearest station is used automatically (distanceKm in the response says how far it is). Heights in feet above MLLW datum, times in GMT.",
+        description: "U.S. coastal tide data from NOAA — when's the next high or low tide, or what's the water level right now: high/low tide predictions for the next 48 hours (product=predictions, default), or the latest observed water level (product=water_level). Identify the location by NOAA CO-OPS station ID, or just pass lat+lng and the nearest station is used automatically (distanceKm in the response says how far it is). Heights in feet above MLLW datum, times in GMT.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -435,7 +435,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /water/streamflow": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Latest real-time river conditions at a USGS stream gauge: streamflow (cubic feet per second) and gauge height (feet). Data is provisional and subject to revision. Requires a USGS site number (e.g. 09380000 = Colorado River at Lees Ferry, AZ).",
+        description: "Real-time river and stream conditions at a USGS stream gauge — current streamflow/discharge (cubic feet per second) and gauge height/water level/stage (feet), i.e. how much water is flowing and how high it is right now. Data is provisional and subject to revision. Requires a USGS site number (e.g. 09380000 = Colorado River at Lees Ferry, AZ).",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -468,7 +468,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /payments/history": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "This seller's own recent USDC settlement history on Base mainnet: every payment received, with transaction hash, payer address, amount, and block number. A self-referential transparency product — proof of real economic activity, independently verifiable on any Base block explorer. Bounded to a recent rolling window (default 24h, max 72h) to keep responses fast. Optional 'address' filters to payments from one specific payer wallet.",
+        description: "This seller's own recent USDC payment/settlement history on Base mainnet — every payment received, with transaction hash, payer wallet address, amount, and block number. Use it to confirm a specific payment was received (e.g., after paying via x402, check whether your transaction actually settled) or to audit the seller's real payment volume as a trust/legitimacy signal, independently verifiable on any Base block explorer. Bounded to a recent rolling window (default 24h, max 72h) to keep responses fast. Optional 'address' parameter filters to payments from one specific payer wallet.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({

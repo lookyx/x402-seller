@@ -123,8 +123,9 @@ echo "BUYER_PRIVATE_KEY=0xyourburnerkey" >> .env
 npm install @x402/fetch @x402/evm viem
 ```
 
-`buyer.js` isn't checked in (edit the URL inline each time you test a different route) —
-it wraps `fetch` with automatic 402-handling and prints the response + settlement status:
+`buyer.js` is checked in as a reusable scratch script — edit the URL inline each time you
+test a different route, it's meant to be edited, not left clean. It wraps `fetch` with
+automatic 402-handling and prints the response + settlement status:
 
 ```bash
 node buyer.js
