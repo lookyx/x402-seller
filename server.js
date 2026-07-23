@@ -46,7 +46,7 @@ const resourceServer = new x402ResourceServer(facilitatorClient)
   .register(NETWORK, new ExactEvmScheme())
   .registerExtension(bazaarResourceServerExtension);
 
-const PRICE_PER_LOOKUP = "$0.0001";
+const PRICE_PER_LOOKUP = "$0.001";
 
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
