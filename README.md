@@ -20,7 +20,6 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /currency/rate?from=...&to=...` | Official daily FX rate between 30+ currencies (ECB) | $0.001 |
 | `GET /air/quality?lat=...&lng=...` | Current US air quality index readings (EPA AirNow) | $0.001 |
 | `GET /space/asteroids?date=...` | Near-Earth asteroids by closest approach date (NASA JPL) | $0.001 |
-| `GET /world/conflict-news?query=...&limit=...` | Conflict/security news metadata by keyword (GDELT) | $0.001 |
 | `GET /chain/balance?address=...&token=...` | Live ETH + ERC20 balance on Base mainnet (Base RPC) | $0.001 |
 | `GET /treasury/debt` | Latest total US national debt "to the penny" (US Treasury) | $0.001 |
 | `GET /ocean/tides?station=...` or `?lat=...&lng=...` | Tide predictions (next 48h) or latest water level at US coastal stations, nearest-station lookup by coordinates (NOAA CO-OPS) | $0.001 |

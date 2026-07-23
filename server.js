@@ -333,43 +333,6 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
-      "GET /world/conflict-news": {
-        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Recent global news coverage matching a conflict/security-related search query (e.g. a country, region, or conflict name), aggregated from worldwide news monitoring. Returns article metadata (title, source, date, link) only — not full article text. Sourced from the GDELT Project. Neutral aggregation of mainstream reporting; does not editorialize.",
-        mimeType: "application/json",
-        extensions: {
-          ...declareDiscoveryExtension({
-            input: { query: "Ukraine", limit: "10" },
-            inputSchema: {
-              properties: {
-                query: { type: "string", description: "Search keywords (e.g. a country, region, or conflict name)" },
-                limit: { type: "string", description: "Max number of results (max 25)" },
-              },
-              required: ["query"],
-            },
-            output: {
-              example: {
-                query: "Ukraine",
-                count: 1,
-                articles: [{
-                  title: "Example headline about the topic",
-                  url: "https://example.com/article",
-                  domain: "example.com",
-                  sourceCountry: "United States",
-                  publishedDate: "2026-07-16T14:30:00Z",
-                }],
-                source: "GDELT Project (global news monitoring)",
-              },
-              schema: {
-                properties: {
-                  query: { type: "string" }, count: { type: "number" },
-                  articles: { type: "array" }, source: { type: "string" },
-                },
-              },
-            },
-          }),
-        },
-      },
       "GET /chain/balance": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
         description: "Live wallet balance on Base mainnet: native ETH plus an optional ERC20 token balance. Sourced from Base's official public RPC.",
@@ -524,7 +487,6 @@ app.get("/", (req, res) => {
       "GET /currency/rate?from=USD&to=JPY",
       "GET /air/quality?lat=...&lng=... (US/CA/MX only)",
       "GET /space/asteroids?date=YYYY-MM-DD",
-      "GET /world/conflict-news?query=...&limit=10",
       "GET /chain/balance?address=0x...&token=0x... (optional)",
       "GET /treasury/debt",
       "GET /ocean/tides?station=... or lat=...&lng=... (&product=predictions|water_level, US coastal stations)",
@@ -535,7 +497,7 @@ app.get("/", (req, res) => {
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
   });
 });
 
@@ -561,7 +523,6 @@ const ROUTE_META = {
   "/currency/rate": { operationId: "currencyRate", summary: "Official daily currency exchange rate", tags: ["finance"] },
   "/air/quality": { operationId: "airQuality", summary: "Current US air quality index readings", tags: ["environment", "weather"] },
   "/space/asteroids": { operationId: "spaceAsteroids", summary: "Near-Earth asteroids by closest approach date", tags: ["space"] },
-  "/world/conflict-news": { operationId: "worldConflictNews", summary: "Global conflict news metadata search", tags: ["news"] },
   "/chain/balance": { operationId: "chainBalance", summary: "Base mainnet wallet ETH and ERC20 balance", tags: ["blockchain"] },
   "/treasury/debt": { operationId: "treasuryDebt", summary: "US national debt to the penny", tags: ["finance", "government"] },
   "/ocean/tides": { operationId: "oceanTides", summary: "US tide predictions and observed water levels", tags: ["ocean", "weather"] },
@@ -650,7 +611,7 @@ function buildX402Manifest() {
       remoteNote: "Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs $0.001 in USDC on Base, paid in-band via x402 (_meta[\"x402/payment\"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.",
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. News data from the GDELT Project. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
   };
 }
 
@@ -937,42 +898,6 @@ async function spaceAsteroidsLogic(args) {
 }
 app.get("/space/asteroids", (req, res) => runHandler(res, () => spaceAsteroidsLogic(req.query)));
 
-async function fetchGdeltWithRetry(params, attempts = 3) {
-  for (let i = 0; i < attempts; i++) {
-    const { data } = await axios.get("https://api.gdeltproject.org/api/v2/doc/doc", {
-      params,
-      responseType: "text",
-      transformResponse: [(d) => d],
-    });
-    if (typeof data === "string" && data.trim().startsWith("Please limit requests")) {
-      if (i === attempts - 1) throw new Error("GDELT rate limit not cleared after retries");
-      await new Promise((resolve) => setTimeout(resolve, 3000 * (i + 1)));
-      continue;
-    }
-    return JSON.parse(data);
-  }
-}
-
-async function worldConflictNewsLogic(args) {
-  const query = args.query;
-  if (!query) throw new HttpError(400, "Missing required query param: query");
-  const limit = Math.min(parseInt(args.limit, 10) || 10, 25);
-  try {
-    const data = await fetchGdeltWithRetry({
-      query, mode: "ArtList", format: "json", maxrecords: limit, sort: "datedesc", timespan: "3d",
-    });
-    const articles = (data?.articles || []).map((a) => ({
-      title: a.title, url: a.url, domain: a.domain, sourceCountry: a.sourcecountry, publishedDate: a.seendate,
-    }));
-    return { query, count: articles.length, articles, source: "GDELT Project (global news monitoring)" };
-  } catch (err) {
-    if (err instanceof HttpError) throw err;
-    console.error(err.response?.data || err.message);
-    throw new HttpError(503, "GDELT is currently rate-limiting this server. Please try again shortly.");
-  }
-}
-app.get("/world/conflict-news", (req, res) => runHandler(res, () => worldConflictNewsLogic(req.query)));
-
 async function baseRpcCall(method, params, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
     try {
@@ -1210,7 +1135,6 @@ const MCP_TOOL_DEFS = [
   { path: "/currency/rate", logic: currencyRateLogic },
   { path: "/air/quality", logic: airQualityLogic },
   { path: "/space/asteroids", logic: spaceAsteroidsLogic },
-  { path: "/world/conflict-news", logic: worldConflictNewsLogic },
   { path: "/chain/balance", logic: chainBalanceLogic },
   { path: "/treasury/debt", logic: treasuryDebtLogic },
   { path: "/ocean/tides", logic: oceanTidesLogic },
@@ -1381,7 +1305,7 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /world/conflict-news, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
