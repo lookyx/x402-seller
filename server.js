@@ -466,6 +466,40 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
+      "GET /payments/history": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "This seller's own recent USDC settlement history on Base mainnet: every payment received, with transaction hash, payer address, amount, and block number. A self-referential transparency product — proof of real economic activity, independently verifiable on any Base block explorer. Bounded to a recent rolling window (default 24h, max 72h) to keep responses fast. Optional 'address' filters to payments from one specific payer wallet.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { hours: "24" },
+            inputSchema: {
+              properties: {
+                hours: { type: "string", description: "Lookback window in hours, default 24, max 72" },
+                address: { type: "string", description: "Optional: filter to payments from this one payer wallet (0x...)" },
+              },
+              required: [],
+            },
+            output: {
+              example: {
+                payTo: "0xbd61dfb01f81c91f02b0ccd51b0220e0c8918639",
+                windowHours: 24,
+                count: 1,
+                payments: [{ txHash: "0x2b4e98bfedc3311d02fbf673fc6a62475600aca34db837744e685661478ae001", from: "0x6bae57ad66659cdf660e0874d948226696299c71", amountUsdc: 0.001, block: 48989927 }],
+                note: "Settlements to this seller's own wallet on Base mainnet, USDC only, over the last 24 hour(s) (max 72). Independently verifiable on any Base block explorer.",
+                source: "Base mainnet public RPC (on-chain USDC Transfer event logs)",
+              },
+              schema: {
+                properties: {
+                  payTo: { type: "string" }, windowHours: { type: "number" },
+                  filteredByPayer: { type: "string" }, count: { type: "number" },
+                  payments: { type: "array" }, note: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
 };
 
 app.use(paymentMiddleware(PAYMENT_ROUTES, resourceServer));
@@ -491,6 +525,7 @@ app.get("/", (req, res) => {
       "GET /treasury/debt",
       "GET /ocean/tides?station=... or lat=...&lng=... (&product=predictions|water_level, US coastal stations)",
       "GET /water/streamflow?site=09380000 (US stream gauges)",
+      "GET /payments/history?hours=24&address=0x... (this seller's own settlement history, max 72h)",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
@@ -527,6 +562,7 @@ const ROUTE_META = {
   "/treasury/debt": { operationId: "treasuryDebt", summary: "US national debt to the penny", tags: ["finance", "government"] },
   "/ocean/tides": { operationId: "oceanTides", summary: "US tide predictions and observed water levels", tags: ["ocean", "weather"] },
   "/water/streamflow": { operationId: "waterStreamflow", summary: "Real-time US river streamflow and gauge height", tags: ["water", "environment"] },
+  "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ["finance", "transparency"] },
 };
 
 function routeEntries() {
@@ -593,7 +629,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: "16 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, earthquakes, air quality, FX rates, US treasury debt, asteroids, news metadata, and on-chain balances. Sourced from licensed and public-domain providers.",
+    summary: "16 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
@@ -946,6 +982,83 @@ async function chainBalanceLogic({ address, token }) {
 }
 app.get("/chain/balance", (req, res) => runHandler(res, () => chainBalanceLogic(req.query)));
 
+// Self-referential product: this seller's own USDC settlement history, read
+// straight from Base mainnet (the same source of truth any buyer could check
+// independently on a block explorer). Bounded to a short recent window --
+// scanning further back means more eth_getLogs chunks and slower responses,
+// the same latency problem that got /world/conflict-news removed earlier.
+const USDC_CONTRACT_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const BASE_BLOCKS_PER_HOUR = Math.floor(3600 / 2); // ~2s block time
+const PAYMENT_HISTORY_DEFAULT_HOURS = 24;
+const PAYMENT_HISTORY_MAX_HOURS = 72;
+
+function padTopicAddress(address) {
+  return "0x" + address.slice(2).toLowerCase().padStart(64, "0");
+}
+
+async function paymentHistoryLogic(args) {
+  let hours = parseInt(args.hours, 10);
+  if (!Number.isFinite(hours) || hours <= 0) hours = PAYMENT_HISTORY_DEFAULT_HOURS;
+  hours = Math.min(hours, PAYMENT_HISTORY_MAX_HOURS);
+
+  let fromAddress = null;
+  if (args.address) {
+    if (!/^0x[a-fA-F0-9]{40}$/.test(args.address)) {
+      throw new HttpError(400, "Invalid 'address' query param (expected 0x... format)");
+    }
+    fromAddress = args.address.toLowerCase();
+  }
+
+  try {
+    const latest = parseInt(await baseRpcCall("eth_blockNumber", []), 16);
+    const blockSpan = Math.floor(hours * BASE_BLOCKS_PER_HOUR);
+    const startBlock = Math.max(0, latest - blockSpan);
+    const topics = [ERC20_TRANSFER_TOPIC, fromAddress ? padTopicAddress(fromAddress) : null, padTopicAddress(PAY_TO)];
+
+    let chunk = 10_000;
+    let cursor = startBlock;
+    const payments = [];
+    while (cursor <= latest) {
+      const end = Math.min(cursor + chunk - 1, latest);
+      try {
+        const logs = await baseRpcCall("eth_getLogs", [{
+          address: USDC_CONTRACT_BASE, topics,
+          fromBlock: "0x" + cursor.toString(16), toBlock: "0x" + end.toString(16),
+        }]);
+        for (const log of logs) {
+          payments.push({
+            txHash: log.transactionHash,
+            from: "0x" + log.topics[1].slice(26),
+            amountUsdc: parseInt(log.data, 16) / 1e6,
+            block: parseInt(log.blockNumber, 16),
+          });
+        }
+        cursor = end + 1;
+      } catch (err) {
+        if (chunk <= 500) throw err;
+        chunk = Math.max(500, Math.floor(chunk / 2));
+      }
+    }
+    payments.sort((a, b) => b.block - a.block);
+
+    return {
+      payTo: PAY_TO,
+      windowHours: hours,
+      ...(fromAddress ? { filteredByPayer: fromAddress } : {}),
+      count: payments.length,
+      payments,
+      note: `Settlements to this seller's own wallet on Base mainnet, USDC only, over the last ${hours} hour(s) (max ${PAYMENT_HISTORY_MAX_HOURS}). Independently verifiable on any Base block explorer.`,
+      source: "Base mainnet public RPC (on-chain USDC Transfer event logs)",
+    };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream Base RPC lookup failed");
+  }
+}
+app.get("/payments/history", (req, res) => runHandler(res, () => paymentHistoryLogic(req.query)));
+
 async function treasuryDebtLogic() {
   try {
     const { data } = await axios.get(
@@ -1139,6 +1252,7 @@ const MCP_TOOL_DEFS = [
   { path: "/treasury/debt", logic: treasuryDebtLogic },
   { path: "/ocean/tides", logic: oceanTidesLogic },
   { path: "/water/streamflow", logic: waterStreamflowLogic },
+  { path: "/payments/history", logic: paymentHistoryLogic },
 ];
 
 const toSnakeCase = (s) => s.replace(/([A-Z])/g, "_$1").toLowerCase();
@@ -1305,7 +1419,7 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow, GET /payments/history`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });

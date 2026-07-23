@@ -39,6 +39,7 @@ const ROUTES = [
   "/treasury/debt",
   "/ocean/tides?station=9414290",
   "/water/streamflow?site=09380000",
+  "/payments/history?hours=24",
 ];
 
 const results = [];

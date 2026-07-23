@@ -24,6 +24,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /treasury/debt` | Latest total US national debt "to the penny" (US Treasury) | $0.001 |
 | `GET /ocean/tides?station=...` or `?lat=...&lng=...` | Tide predictions (next 48h) or latest water level at US coastal stations, nearest-station lookup by coordinates (NOAA CO-OPS) | $0.001 |
 | `GET /water/streamflow?site=...` | Real-time river streamflow + gauge height at US stream gauges (USGS) | $0.001 |
+| `GET /payments/history?hours=24&address=...` | This seller's own recent USDC settlement history on Base (self-referential, max 72h window) | $0.001 |
 
 All data sources are either explicitly licensed for commercial resale (LocationIQ) or
 official public-domain government data with no redistribution restriction (EIA, NWS).
