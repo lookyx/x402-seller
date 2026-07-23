@@ -143,7 +143,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /electricity/price": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Current average retail price of electricity in the U.S., in cents per kilowatt-hour (cents/kWh) — matches queries like \"what's the electricity price right now\", \"how much does power cost per kWh\", \"electricity rates by state\". Reflects the latest monthly data (not real-time), averaged across all sectors combined (residential, commercial, industrial, etc. — not sector-specific), sourced from the U.S. Energy Information Administration (EIA). Optional 'state' param (2-letter code, e.g. 'TX') returns that state's average instead of the national figure.",
+        description: "Current average U.S. retail price of electricity, in cents per kilowatt-hour (cents/kWh) — e.g. \"what's the electricity price right now\". Reflects the latest monthly data (not real-time), averaged across all sectors combined (not sector-specific), sourced from the U.S. Energy Information Administration (EIA). Optional 'state' param (2-letter code) returns that state's average instead of the national figure.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
@@ -468,7 +468,7 @@ const PAYMENT_ROUTES = {
       },
       "GET /payments/history": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "This seller's own recent USDC payment/settlement history on Base mainnet — every payment received, with transaction hash, payer wallet address, amount, and block number. Use it to confirm a specific payment was received (e.g., after paying via x402, check whether your transaction actually settled) or to audit the seller's real payment volume as a trust/legitimacy signal, independently verifiable on any Base block explorer. Bounded to a recent rolling window (default 24h, max 72h) to keep responses fast. Optional 'address' parameter filters to payments from one specific payer wallet.",
+        description: "This seller's own recent USDC settlement history on Base mainnet — every payment received, with transaction hash, payer address, amount, and block number. Use it to confirm whether a specific payment settled, or to audit real payment volume; verifiable on any Base block explorer. Bounded to a recent rolling window (default 24h, max 72h) to keep responses fast. Optional 'address' param filters to one payer wallet.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
