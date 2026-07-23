@@ -40,6 +40,7 @@ const ROUTES = [
   "/ocean/tides?station=9414290",
   "/water/streamflow?site=09380000",
   "/payments/history?hours=24",
+  "/census/demographics?zip=10001",
 ];
 
 const results = [];

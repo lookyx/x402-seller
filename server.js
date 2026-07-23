@@ -22,12 +22,14 @@ const LOCATIONIQ_API_KEY = process.env.LOCATIONIQ_API_KEY;
 const EIA_API_KEY = process.env.EIA_API_KEY;
 const AIRNOW_API_KEY = process.env.AIRNOW_API_KEY;
 const NASA_API_KEY = process.env.NASA_API_KEY;
+const CENSUS_API_KEY = process.env.CENSUS_API_KEY;
 
 if (!PAY_TO) { console.error("\n❌ Missing PAY_TO_ADDRESS.\n"); process.exit(1); }
 if (!LOCATIONIQ_API_KEY) { console.error("\n❌ Missing LOCATIONIQ_API_KEY.\n"); process.exit(1); }
 if (!EIA_API_KEY) { console.error("\n❌ Missing EIA_API_KEY.\n"); process.exit(1); }
 if (!AIRNOW_API_KEY) { console.error("\n❌ Missing AIRNOW_API_KEY.\n"); process.exit(1); }
 if (!NASA_API_KEY) { console.error("\n❌ Missing NASA_API_KEY.\n"); process.exit(1); }
+if (!CENSUS_API_KEY) { console.error("\n❌ Missing CENSUS_API_KEY.\n"); process.exit(1); }
 
 const NWS_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
 const BASE_RPC_URL = "https://mainnet.base.org";
@@ -500,6 +502,35 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
+      "GET /census/demographics": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "US Census Bureau American Community Survey (ACS) 5-Year estimates for a ZIP code: total population, median household income, median age, and total housing units. ZIP codes map to Census ZCTAs (Census-drawn approximations); some ZIPs (PO-box-only or very new) have no ZCTA match and return 404. Reflects a rolling 5-year survey window, not real-time.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { zip: "10001" },
+            inputSchema: {
+              properties: { zip: { type: "string", description: "5-digit US ZIP code" } },
+              required: ["zip"],
+            },
+            output: {
+              example: {
+                zip: "10001", zcta: "10001", name: "ZCTA5 10001",
+                population: 30511, medianHouseholdIncome: 129852, medianAge: 35.8, housingUnits: 18356,
+                vintage: "2020-2024", source: "U.S. Census Bureau American Community Survey (ACS) 5-Year Estimates",
+              },
+              schema: {
+                properties: {
+                  zip: { type: "string" }, zcta: { type: "string" }, name: { type: ["string", "null"] },
+                  population: { type: ["number", "null"] }, medianHouseholdIncome: { type: ["number", "null"] },
+                  medianAge: { type: ["number", "null"] }, housingUnits: { type: ["number", "null"] },
+                  vintage: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
 };
 
 app.use(paymentMiddleware(PAYMENT_ROUTES, resourceServer));
@@ -526,13 +557,14 @@ app.get("/", (req, res) => {
       "GET /ocean/tides?station=... or lat=...&lng=... (&product=predictions|water_level, US coastal stations)",
       "GET /water/streamflow?site=09380000 (US stream gauges)",
       "GET /payments/history?hours=24&address=0x... (this seller's own settlement history, max 72h)",
+      "GET /census/demographics?zip=10001 (US Census ACS 5-Year population/income/age/housing by ZIP)",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau.",
   });
 });
 
@@ -563,6 +595,7 @@ const ROUTE_META = {
   "/ocean/tides": { operationId: "oceanTides", summary: "US tide predictions and observed water levels", tags: ["ocean", "weather"] },
   "/water/streamflow": { operationId: "waterStreamflow", summary: "Real-time US river streamflow and gauge height", tags: ["water", "environment"] },
   "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ["finance", "transparency"] },
+  "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ["geo", "government", "demographics"] },
 };
 
 function routeEntries() {
@@ -629,7 +662,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: "16 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
+    summary: "17 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
@@ -647,7 +680,7 @@ function buildX402Manifest() {
       remoteNote: "Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs $0.001 in USDC on Base, paid in-band via x402 (_meta[\"x402/payment\"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.",
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau.",
   };
 }
 
@@ -1231,6 +1264,63 @@ async function waterStreamflowLogic({ site }) {
 }
 app.get("/water/streamflow", (req, res) => runHandler(res, () => waterStreamflowLogic(req.query)));
 
+// Vintage year = the API path segment and the end-year of the 5-year window.
+// Census releases a new 5-year ACS vintage annually (usually late January);
+// bump this one constant each year.
+const CENSUS_ACS_VINTAGE_YEAR = 2024; // 2020-2024 5-Year Estimates (released 2026-01-29)
+
+async function censusDemographicsLogic({ zip }) {
+  if (!zip || !/^\d{5}(-\d{4})?$/.test(zip)) {
+    throw new HttpError(400, "Missing or invalid 'zip' query param (expected 5-digit US ZIP code)");
+  }
+  const zip5 = zip.slice(0, 5);
+  try {
+    const { data, status } = await axios.get(`https://api.census.gov/data/${CENSUS_ACS_VINTAGE_YEAR}/acs/acs5`, {
+      params: {
+        get: "NAME,B01003_001E,B19013_001E,B01002_001E,B25001_001E",
+        for: `zip code tabulation area:${zip5}`,
+        key: CENSUS_API_KEY,
+      },
+    });
+    // Confirmed empirically: a ZIP with no matching ZCTA (PO-box-only, very
+    // new) returns 204 No Content with an empty body, not a 4xx error.
+    if (status === 204) {
+      throw new HttpError(404, `No Census ZCTA data found for ZIP ${zip5} (this ZIP code may have no matching ZCTA)`);
+    }
+    // A missing/invalid key makes Census respond 200 with an HTML error page
+    // instead of the expected JSON array — confirmed empirically, axios
+    // never throws for this since it's a 2xx status.
+    if (!Array.isArray(data) || data.length < 2) {
+      throw new HttpError(502, "Unexpected response from Census API (missing/invalid CENSUS_API_KEY, or upstream format change)");
+    }
+    const [header, row] = data;
+    const rec = Object.fromEntries(header.map((h, i) => [h, row[i]]));
+    // ACS suppresses low-reliability estimates with sentinel negative codes
+    // (e.g. -666666666) instead of omitting the field.
+    const num = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    return {
+      zip: zip5,
+      zcta: rec["zip code tabulation area"] || zip5,
+      name: rec.NAME || null,
+      population: num(rec.B01003_001E),
+      medianHouseholdIncome: num(rec.B19013_001E),
+      medianAge: num(rec.B01002_001E),
+      housingUnits: num(rec.B25001_001E),
+      vintage: `${CENSUS_ACS_VINTAGE_YEAR - 4}-${CENSUS_ACS_VINTAGE_YEAR}`,
+      attribution: "This product uses the Census Bureau Data API but is not endorsed or certified by the Census Bureau.",
+      source: "U.S. Census Bureau American Community Survey (ACS) 5-Year Estimates",
+    };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream Census API lookup failed");
+  }
+}
+app.get("/census/demographics", (req, res) => runHandler(res, () => censusDemographicsLogic(req.query)));
+
 // ---- MCP endpoint (POST /mcp) — the same 16 tools, payable in-band via x402 ----
 // Stateless Streamable HTTP: initialize and tools/list are free; each tools/call is
 // wrapped by @x402/mcp — unpaid calls get the payment requirements as a structured
@@ -1253,6 +1343,7 @@ const MCP_TOOL_DEFS = [
   { path: "/ocean/tides", logic: oceanTidesLogic },
   { path: "/water/streamflow", logic: waterStreamflowLogic },
   { path: "/payments/history", logic: paymentHistoryLogic },
+  { path: "/census/demographics", logic: censusDemographicsLogic },
 ];
 
 const toSnakeCase = (s) => s.replace(/([A-Z])/g, "_$1").toLowerCase();
@@ -1419,7 +1510,7 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow, GET /payments/history`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow, GET /payments/history, GET /census/demographics`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });

@@ -25,6 +25,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /ocean/tides?station=...` or `?lat=...&lng=...` | Tide predictions (next 48h) or latest water level at US coastal stations, nearest-station lookup by coordinates (NOAA CO-OPS) | $0.001 |
 | `GET /water/streamflow?site=...` | Real-time river streamflow + gauge height at US stream gauges (USGS) | $0.001 |
 | `GET /payments/history?hours=24&address=...` | This seller's own recent USDC settlement history on Base (self-referential, max 72h window) | $0.001 |
+| `GET /census/demographics?zip=...` | US Census ACS 5-Year population, median income, median age, and housing units by ZIP code (Census Bureau) | $0.001 |
 
 All data sources are either explicitly licensed for commercial resale (LocationIQ) or
 official public-domain government data with no redistribution restriction (EIA, NWS).
@@ -50,6 +51,7 @@ Required environment variables (see `.env.example`):
 - `PAY_TO_ADDRESS` — your wallet address, receives all USDC payments
 - `LOCATIONIQ_API_KEY` — free at locationiq.com (5,000 req/day free tier, licensed for commercial resale)
 - `EIA_API_KEY` — free at eia.gov/opendata/register.php (no rate limit stated; official US government data)
+- `CENSUS_API_KEY` — free at api.census.gov/data/key_signup.html (mandatory on every call since a May 2026 policy change; official US government data)
 - `NETWORK` / `FACILITATOR_URL` — testnet by default; see "Mainnet" below
 - `CDP_API_KEY_ID` / `CDP_API_KEY_SECRET` — only needed for mainnet (see below)
 
@@ -156,6 +158,16 @@ redistribution restrictions. Lessons learned building this:
   with genuine daily/monthly freshness.
 - **NWS/NOAA** — free, no key, public domain, but requires a descriptive `User-Agent`
   header (rejects requests without one) and only covers US locations.
+- **US Census Bureau (ACS 5-Year)** — public domain, no resale restriction, but a
+  May 2026 policy change now requires an API key on *every* call (previously ~500/day
+  were free without one). A missing/invalid key doesn't error — it 302-redirects to an
+  HTML page that axios follows silently, resolving as a 200 with an HTML body instead
+  of the expected JSON array, so the handler must explicitly check `Array.isArray(data)`
+  rather than trusting a non-error response. A ZIP with no matching Census ZCTA
+  (PO-box-only or very new) returns `204 No Content`, not a 4xx — both confirmed by
+  live testing, not assumed from docs. Single-ZCTA queries for the 2020+ vintage must
+  omit the `in=state:XX` qualifier entirely (adding it causes a 400 "unsupported
+  geography hierarchy" — the opposite of what older/pre-2020 vintages required).
 
 ## Extending this
 
