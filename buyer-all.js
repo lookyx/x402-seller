@@ -39,6 +39,10 @@ const ROUTES = [
   "/treasury/debt",
   "/ocean/tides?station=9414290",
   "/water/streamflow?site=09380000",
+  // Potomac at Little Falls - deliberately NOT Lees Ferry (09380000), which is
+  // reservoir-controlled, has no official NWS flood stages, and correctly
+  // returns 422 without settling. It would read as a regression here.
+  "/water/flood-risk?site=01646500",
   "/payments/history?hours=24",
   "/census/demographics?zip=10001",
   "/sec/filings-search?q=chip%20shortage&forms=10-K",
