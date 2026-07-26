@@ -32,6 +32,7 @@ if (!NASA_API_KEY) { console.error("\n❌ Missing NASA_API_KEY.\n"); process.exi
 if (!CENSUS_API_KEY) { console.error("\n❌ Missing CENSUS_API_KEY.\n"); process.exit(1); }
 
 const NWS_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
+const SEC_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
 const BASE_RPC_URL = "https://mainnet.base.org";
 const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
@@ -531,6 +532,42 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
+      "GET /sec/filings-search": {
+        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        description: "Full-text search across every SEC EDGAR filing since 2001 (10-K, 10-Q, 8-K, and more) by keyword, company name, or topic. Returns matching filings: company name, ticker (if available), CIK, form type, filing date, accession number, SIC code, and a direct link to the filing. Optional forms filters by comma-separated form type(s); startdt/enddt filter by filing date (YYYY-MM-DD).",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { q: "chip shortage", forms: "10-K" },
+            inputSchema: {
+              properties: {
+                q: { type: "string", description: "Search phrase; quote for an exact phrase match" },
+                forms: { type: "string", description: "Comma-separated SEC form types, e.g. '10-K,8-K'" },
+                startdt: { type: "string", description: "Filing date range start, YYYY-MM-DD" },
+                enddt: { type: "string", description: "Filing date range end, YYYY-MM-DD" },
+                limit: { type: "string", description: "Max number of results (default 10, max 50)" },
+              },
+              required: ["q"],
+            },
+            output: {
+              example: {
+                query: "chip shortage", totalMatches: 227, totalMatchesApproximate: false, count: 1,
+                filings: [{ company: "STRATTEC SECURITY CORP", ticker: "STRT", cik: 933034, formType: "10-K",
+                  filingDate: "2022-09-08", accessionNumber: "0001564590-22-031301", sic: "3714",
+                  filingUrl: "https://www.sec.gov/Archives/edgar/data/933034/0001564590-22-031301-index.htm" }],
+                source: "U.S. Securities and Exchange Commission (SEC) EDGAR Full-Text Search",
+              },
+              schema: {
+                properties: {
+                  query: { type: "string" }, totalMatches: { type: "number" },
+                  totalMatchesApproximate: { type: "boolean" }, count: { type: "number" },
+                  filings: { type: "array" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
 };
 
 app.use(paymentMiddleware(PAYMENT_ROUTES, resourceServer));
@@ -558,13 +595,14 @@ app.get("/", (req, res) => {
       "GET /water/streamflow?site=09380000 (US stream gauges)",
       "GET /payments/history?hours=24&address=0x... (this seller's own settlement history, max 72h)",
       "GET /census/demographics?zip=10001 (US Census ACS 5-Year population/income/age/housing by ZIP)",
+      "GET /sec/filings-search?q=chip+shortage&forms=10-K (full-text search across all SEC EDGAR filings since 2001)",
     ],
     price_per_call: PRICE_PER_LOOKUP,
     protocol: "x402",
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   });
 });
 
@@ -596,6 +634,7 @@ const ROUTE_META = {
   "/water/streamflow": { operationId: "waterStreamflow", summary: "Real-time US river streamflow and gauge height", tags: ["water", "environment"] },
   "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ["finance", "transparency"] },
   "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ["geo", "government", "demographics"] },
+  "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ["finance", "government"] },
 };
 
 function routeEntries() {
@@ -662,7 +701,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: "17 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
+    summary: "18 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
@@ -680,7 +719,7 @@ function buildX402Manifest() {
       remoteNote: "Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs $0.001 in USDC on Base, paid in-band via x402 (_meta[\"x402/payment\"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.",
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   };
 }
 
@@ -1321,7 +1360,57 @@ async function censusDemographicsLogic({ zip }) {
 }
 app.get("/census/demographics", (req, res) => runHandler(res, () => censusDemographicsLogic(req.query)));
 
-// ---- MCP endpoint (POST /mcp) — the same 16 tools, payable in-band via x402 ----
+async function secFilingsSearchLogic(args) {
+  const { q, forms, startdt, enddt } = args;
+  if (!q) throw new HttpError(400, "Missing required query param: q");
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+  if (startdt && !dateRe.test(startdt)) throw new HttpError(400, "startdt must be in YYYY-MM-DD format");
+  if (enddt && !dateRe.test(enddt)) throw new HttpError(400, "enddt must be in YYYY-MM-DD format");
+  const limit = Math.min(parseInt(args.limit, 10) || 10, 50);
+  try {
+    const { data } = await axios.get("https://efts.sec.gov/LATEST/search-index", {
+      headers: { "User-Agent": SEC_USER_AGENT },
+      params: { q, ...(forms ? { forms } : {}), ...(startdt ? { startdt } : {}), ...(enddt ? { enddt } : {}) },
+    });
+    // A blank/invalid query returns HTTP 200 with an error field instead of
+    // a 4xx -- axios never throws for this, the body must be inspected.
+    if (data.error || data.errorMessage) {
+      console.error(data.error || data.errorMessage);
+      throw new HttpError(400, "Invalid search parameters (check query syntax and date format)");
+    }
+    const total = data.hits?.total?.value ?? 0;
+    const totalIsApprox = data.hits?.total?.relation === "gte";
+    // The upstream `size` param is silently ignored -- every page is capped
+    // at 100 hits regardless, so slice to our own limit client-side.
+    const filings = (data.hits?.hits || []).slice(0, limit).map((hit) => {
+      const src = hit._source || {};
+      const cik = src.ciks?.[0] ? Number(src.ciks[0]) : null;
+      const nameMatch = (src.display_names?.[0] || "").match(/^(.*?)\s*(?:\(([A-Z.\-]+)\)\s*)?\(CIK \d+\)$/);
+      return {
+        company: nameMatch ? nameMatch[1].trim() : (src.display_names?.[0] || null),
+        ticker: nameMatch?.[2] || null,
+        cik,
+        formType: src.form || null,
+        filingDate: src.file_date || null,
+        accessionNumber: src.adsh || null,
+        sic: src.sics?.[0] || null,
+        filingUrl: cik && src.adsh ? `https://www.sec.gov/Archives/edgar/data/${cik}/${src.adsh}-index.htm` : null,
+      };
+    });
+    return {
+      query: q, totalMatches: total, totalMatchesApproximate: totalIsApprox,
+      count: filings.length, filings,
+      source: "U.S. Securities and Exchange Commission (SEC) EDGAR Full-Text Search",
+    };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream SEC EDGAR lookup failed");
+  }
+}
+app.get("/sec/filings-search", (req, res) => runHandler(res, () => secFilingsSearchLogic(req.query)));
+
+// ---- MCP endpoint (POST /mcp) — the same 18 tools, payable in-band via x402 ----
 // Stateless Streamable HTTP: initialize and tools/list are free; each tools/call is
 // wrapped by @x402/mcp — unpaid calls get the payment requirements as a structured
 // result, x402-aware clients retry with _meta["x402/payment"] and get data + receipt.
@@ -1343,6 +1432,7 @@ const MCP_TOOL_DEFS = [
   { path: "/ocean/tides", logic: oceanTidesLogic },
   { path: "/water/streamflow", logic: waterStreamflowLogic },
   { path: "/payments/history", logic: paymentHistoryLogic },
+  { path: "/sec/filings-search", logic: secFilingsSearchLogic },
   { path: "/census/demographics", logic: censusDemographicsLogic },
 ];
 
@@ -1510,7 +1600,7 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow, GET /payments/history, GET /census/demographics`);
+  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow, GET /payments/history, GET /census/demographics, GET /sec/filings-search`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });

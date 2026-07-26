@@ -41,6 +41,7 @@ const ROUTES = [
   "/water/streamflow?site=09380000",
   "/payments/history?hours=24",
   "/census/demographics?zip=10001",
+  "/sec/filings-search?q=chip%20shortage&forms=10-K",
 ];
 
 const results = [];

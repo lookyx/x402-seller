@@ -26,6 +26,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /water/streamflow?site=...` | Real-time river streamflow + gauge height at US stream gauges (USGS) | $0.001 |
 | `GET /payments/history?hours=24&address=...` | This seller's own recent USDC settlement history on Base (self-referential, max 72h window) | $0.001 |
 | `GET /census/demographics?zip=...` | US Census ACS 5-Year population, median income, median age, and housing units by ZIP code (Census Bureau) | $0.001 |
+| `GET /sec/filings-search?q=...&forms=10-K` | Full-text search across all SEC EDGAR filings since 2001, by keyword/company/topic (SEC EDGAR) | $0.001 |
 
 All data sources are either explicitly licensed for commercial resale (LocationIQ) or
 official public-domain government data with no redistribution restriction (EIA, NWS).
@@ -168,6 +169,17 @@ redistribution restrictions. Lessons learned building this:
   live testing, not assumed from docs. Single-ZCTA queries for the 2020+ vintage must
   omit the `in=state:XX` qualifier entirely (adding it causes a 400 "unsupported
   geography hierarchy" — the opposite of what older/pre-2020 vintages required).
+- **SEC EDGAR Full-Text Search (`efts.sec.gov`)** — public domain, no key, but a
+  blank/invalid query returns `HTTP 200` with an `error`/`errorMessage` field in the
+  body instead of a 4xx — axios never throws, the handler must inspect the body (same
+  trap as the Census 302-that-resolves-as-200 gotcha). The `size` query param is
+  silently ignored server-side — every page is capped at 100 hits regardless of what
+  you ask for; only `from` (offset) actually paginates. `dateRange=custom` is a
+  web-UI-only param, not needed — `startdt`/`enddt` filter correctly without it.
+  `hits.total.relation` flips to `"gte"` (an approximate floor, not an exact count)
+  once the true match count exceeds ~10,000. Filing URL is
+  `https://www.sec.gov/Archives/edgar/data/{CIK-no-leading-zeros}/{accession-with-dashes}-index.htm`,
+  confirmed against SEC's own webmaster FAQ and a live 200 fetch.
 
 ## Extending this
 
