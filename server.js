@@ -1456,6 +1456,23 @@ async function findNwpsGaugeNear(lat, lng) {
   return best && best.distance <= NWPS_MAX_MATCH_KM ? best : null;
 }
 
+// A gauge does not move, so site -> NWS gauge never needs recomputing. Caching
+// it drops the bbox lookup, one of the three upstream calls this route makes,
+// and it was the only cacheable one (the USGS reading and the NWPS observation
+// must both be live). Negative results are cached too, so sites with no nearby
+// gauge don't re-query on every call. Bounded so a stream of distinct site
+// params cannot grow it without limit; entries are tiny and eviction is
+// oldest-first, which Map's insertion order gives for free.
+const NWPS_GAUGE_CACHE_MAX = 500;
+const nwpsGaugeCache = new Map();
+
+function rememberGauge(site, value) {
+  if (nwpsGaugeCache.size >= NWPS_GAUGE_CACHE_MAX) {
+    nwpsGaugeCache.delete(nwpsGaugeCache.keys().next().value);
+  }
+  nwpsGaugeCache.set(site, value);
+}
+
 async function waterFloodRiskLogic({ site, lid }) {
   if (!site && !lid) {
     throw new HttpError(400, "Missing required query param: site (USGS site number, e.g. 01646500) or lid (NWS gauge ID, e.g. BRKM2)");
@@ -1473,7 +1490,14 @@ async function waterFloodRiskLogic({ site, lid }) {
       if (typeof usgsReading.lat !== "number" || typeof usgsReading.lng !== "number") {
         throw new HttpError(404, `USGS site '${site}' has no coordinates, so it cannot be matched to an NWS flood gauge`);
       }
-      const best = await findNwpsGaugeNear(usgsReading.lat, usgsReading.lng);
+      const cacheKey = String(site);
+      let best;
+      if (nwpsGaugeCache.has(cacheKey)) {
+        best = nwpsGaugeCache.get(cacheKey);
+      } else {
+        best = await findNwpsGaugeNear(usgsReading.lat, usgsReading.lng);
+        rememberGauge(cacheKey, best);
+      }
       if (!best) {
         throw new HttpError(404, `No NWS river gauge found within ${NWPS_MAX_MATCH_KM} km of USGS site '${site}'`);
       }
