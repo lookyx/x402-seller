@@ -33,7 +33,10 @@ const ROUTES = [
   "/nuclear/outages",
   "/earthquakes/recent?minmagnitude=4.5&limit=5",
   "/currency/rate?from=USD&to=JPY",
-  "/air/quality?lat=37.7749&lng=-122.4194",
+  // Los Angeles, not San Francisco: AirNow currently reports zero monitors near
+  // SF at any radius (verified 0 readings at 25/50/100 miles), so the route
+  // correctly 404s there and the run shows a phantom FAIL. LA reports 3.
+  "/air/quality?lat=34.0522&lng=-118.2437",
   "/space/asteroids",
   "/chain/balance?address=0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
   "/treasury/debt",
