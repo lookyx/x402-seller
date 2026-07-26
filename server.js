@@ -39,6 +39,21 @@ const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: 
 const app = express();
 app.set("trust proxy", 1);
 
+// Logs every request on completion (not just errors) so Render's free-tier
+// Application Logs can substitute for the Pro-gated Request Logs / Path
+// filter. One line per request, [REQ]-prefixed for easy grepping. Kept
+// permanently (not removed after a single investigation like the July 2026
+// 404 diagnostic logger) since it's cheap and has already proven useful for
+// diagnosing traffic questions the dashboard's aggregate charts can't answer.
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on("finish", () => {
+    const ms = Date.now() - startedAt;
+    console.log(`[REQ] ${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms ip=${req.ip} ua="${req.get("user-agent") || ""}"`);
+  });
+  next();
+});
+
 const baseFacilitatorClient = USING_CDP
   ? new HTTPFacilitatorClient(cdpFacilitatorConfig)
   : new HTTPFacilitatorClient({ url: FACILITATOR_URL });
