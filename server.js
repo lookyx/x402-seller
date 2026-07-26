@@ -884,6 +884,19 @@ async function geoReverseLogic({ lat, lng }) {
 }
 app.get("/geo/reverse", (req, res) => runHandler(res, () => geoReverseLogic(req.query)));
 
+// EIA returns numeric fields as JSON strings ("13.83") even though its own
+// schema promises numbers, so every numeric field taken from it must be coerced
+// or the route silently violates its published output schema. Returns null
+// rather than NaN on junk: JSON.stringify would render NaN as null anyway, so
+// being explicit keeps the contract honest instead of accidental.
+const eiaNum = (v) => {
+  if (v == null) return null;
+  // Number("") is 0, which would report a missing field as a real zero price.
+  if (typeof v === "string" && v.trim() === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
 async function oilPriceLogic({ benchmark }) {
   const benchmarkParam = (benchmark || "wti").toLowerCase();
   const seriesMap = { wti: { code: "RWTC", label: "WTI" }, brent: { code: "RBRTE", label: "Brent" } };
@@ -899,7 +912,7 @@ async function oilPriceLogic({ benchmark }) {
     const points = data?.response?.data || [];
     if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
-    return { benchmark: chosen.label, price: latest.value != null ? parseFloat(latest.value) : null, unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
+    return { benchmark: chosen.label, price: eiaNum(latest.value), unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
@@ -919,7 +932,7 @@ async function gasPriceLogic() {
     const points = data?.response?.data || [];
     if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
-    return { benchmark: "Henry Hub", price: latest.value != null ? parseFloat(latest.value) : null, unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
+    return { benchmark: "Henry Hub", price: eiaNum(latest.value), unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
@@ -941,7 +954,7 @@ async function electricityPriceLogic(args) {
     const points = data?.response?.data || [];
     if (points.length === 0) throw new HttpError(404, `No data found for state '${state}'`);
     const latest = points[0];
-    return { region: latest.stateDescription || state, price: latest.price, unit: "cents per kilowatt-hour", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
+    return { region: latest.stateDescription || state, price: eiaNum(latest.price), unit: "cents per kilowatt-hour", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
@@ -990,8 +1003,8 @@ async function nuclearOutagesLogic() {
     if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
     return {
-      date: latest.period, capacityMw: latest.capacity, outageMw: latest.outage,
-      percentOutage: latest.percentOutage, source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission",
+      date: latest.period, capacityMw: eiaNum(latest.capacity), outageMw: eiaNum(latest.outage),
+      percentOutage: eiaNum(latest.percentOutage), source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission",
     };
   } catch (err) {
     if (err instanceof HttpError) throw err;
