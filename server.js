@@ -70,10 +70,12 @@ const PRICE_OIL = "$0.005";
 const PRICE_CURRENCY_RATE = "$0.008";
 const PRICE_CHAIN_BALANCE = "$0.012";
 // Interpreted-signal route rather than a raw lookup, so it is priced off the
-// audited competitor selling the same USGS/NOAA feeds as a flood-risk answer
-// (real settlements averaging ~$0.31/call), set below theirs and at the
-// catalog's p90 rather than at this project's raw-data default.
-const PRICE_FLOOD_RISK = "$0.15";
+// audited competitor selling the same USGS/NOAA feeds as a flood-risk answer,
+// matching the ~$0.31/call they actually settle on-chain rather than this
+// project's raw-data default. That is above the catalog's p90 ($0.15), which is
+// deliberate: the comparable is what a buyer already pays for this answer, not
+// what the median listing (which mostly earns nothing) asks for.
+const PRICE_FLOOD_RISK = "$0.31";
 
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
