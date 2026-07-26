@@ -69,6 +69,11 @@ const PRICE_SEC_FILINGS_SEARCH = "$0.05";
 const PRICE_OIL = "$0.005";
 const PRICE_CURRENCY_RATE = "$0.008";
 const PRICE_CHAIN_BALANCE = "$0.012";
+// Interpreted-signal route rather than a raw lookup, so it is priced off the
+// audited competitor selling the same USGS/NOAA feeds as a flood-risk answer
+// (real settlements averaging ~$0.31/call), set below theirs and at the
+// catalog's p90 rather than at this project's raw-data default.
+const PRICE_FLOOD_RISK = "$0.15";
 
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
@@ -488,6 +493,49 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
+      "GET /water/flood-risk": {
+        accepts: [{ scheme: "exact", price: PRICE_FLOOD_RISK, network: NETWORK, payTo: PAY_TO }],
+        description: "Flood risk at a US river gauge: current water level measured against the official National Weather Service flood stages (action, minor, moderate, major), how many feet remain before each one is reached, and NOAA's own observed and forecast flood category. Answers \"is this river near flooding\". Takes a USGS site number or an NWS gauge ID. Not every gauge has official flood stages.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { site: "01646500" },
+            inputSchema: {
+              properties: {
+                site: { type: "string", description: "USGS site number (e.g. 01646500)" },
+                lid: { type: "string", description: "NWS gauge ID (e.g. BRKM2), as an alternative to site" },
+              },
+              required: [],
+            },
+            output: {
+              example: {
+                site: "01646500",
+                gauge: { lid: "BRKM2", name: "Potomac River near Washington DC (Little Falls)", matchedBy: "coordinates", matchDistanceKm: 0.004 },
+                observed: { stageFt: 2.89, floodCategory: "no_flooding", time: "2026-07-26T06:45:00Z" },
+                forecast: { stageFt: 2.9, floodCategory: "no_flooding", time: "2026-07-26T12:00:00Z" },
+                floodStagesFt: { action: 5, minor: 10, moderate: 12, major: 14 },
+                feetBelowStage: { action: 2.11, minor: 7.11, moderate: 9.11, major: 11.11 },
+                nextThreshold: { name: "action", stageFt: 5, feetAway: 2.11 },
+                trend: "rising",
+                usgs: { streamflowCfs: 2300, gaugeHeightFt: 2.89 },
+                source: "NOAA/NWS National Water Prediction Service; USGS National Water Information System",
+              },
+              schema: {
+                properties: {
+                  site: { type: ["string", "null"] },
+                  gauge: { type: "object" },
+                  observed: { type: "object" }, forecast: { type: "object" },
+                  floodStagesFt: { type: "object" }, feetBelowStage: { type: "object" },
+                  nextThreshold: { type: ["object", "null"] },
+                  trend: { type: ["string", "null"] },
+                  usgs: { type: ["object", "null"] },
+                  source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
       "GET /payments/history": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
         description: "This seller's own recent USDC settlement history on Base mainnet — every payment received, with transaction hash, payer address, amount, and block number. Use it to confirm whether a specific payment settled, or to audit real payment volume; verifiable on any Base block explorer. Bounded to a recent rolling window (default 24h, max 72h) to keep responses fast. Optional 'address' param filters to one payer wallet.",
@@ -638,6 +686,7 @@ app.get("/", (req, res) => {
       "GET /treasury/debt",
       "GET /ocean/tides?station=... or lat=...&lng=... (&product=predictions|water_level, US coastal stations)",
       "GET /water/streamflow?site=09380000 (US stream gauges)",
+      "GET /water/flood-risk?site=01646500 (river level vs official NWS flood stages)",
       "GET /payments/history?hours=24&address=0x... (this seller's own settlement history, max 72h)",
       "GET /census/demographics?zip=10001 (US Census ACS 5-Year population/income/age/housing by ZIP)",
       "GET /sec/filings-search?q=chip+shortage&forms=10-K (full-text search across all SEC EDGAR filings since 2001)",
@@ -677,6 +726,7 @@ const ROUTE_META = {
   "/treasury/debt": { operationId: "treasuryDebt", summary: "US national debt to the penny", tags: ["finance", "government"] },
   "/ocean/tides": { operationId: "oceanTides", summary: "US tide predictions and observed water levels", tags: ["ocean", "weather"] },
   "/water/streamflow": { operationId: "waterStreamflow", summary: "Real-time US river streamflow and gauge height", tags: ["water", "environment"] },
+  "/water/flood-risk": { operationId: "waterFloodRisk", summary: "US river level vs official NWS flood stages, with flood category and trend", tags: ["water", "environment", "risk"] },
   "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ["finance", "transparency"] },
   "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ["geo", "government", "demographics"] },
   "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ["finance", "government"] },
@@ -746,7 +796,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: "18 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
+    summary: "19 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
@@ -1348,6 +1398,181 @@ async function waterStreamflowLogic({ site }) {
 }
 app.get("/water/streamflow", (req, res) => runHandler(res, () => waterStreamflowLogic(req.query)));
 
+// --- /water/flood-risk -------------------------------------------------------
+// NOAA's National Water Prediction Service publishes the official NWS flood
+// stages per gauge, plus its own observed/forecast flood category. Public
+// domain, no API key - same licensing footing as the NOAA tide and weather
+// feeds already used here.
+const NWPS_BASE = "https://api.water.noaa.gov/nwps/v1";
+// NWPS uses -9999 for an undefined threshold and -999 for a missing reading.
+// Passing those through raw would report a river as 9999 ft below flood stage.
+const NWPS_SENTINELS = new Set([-9999, -999]);
+const nwpsNum = (v) => (typeof v === "number" && !NWPS_SENTINELS.has(v) ? v : null);
+const NWPS_MAX_MATCH_KM = 2;
+
+// Distance uses the existing haversineKm() defined above for NOAA tide-station
+// matching - same problem, same maths.
+
+// The gauge list carries coordinates but no USGS id; the per-gauge endpoint
+// carries the USGS id but needs an lid. So site -> gauge has to be resolved
+// spatially. Query a small bounding box around the site rather than the national
+// gauge list: that list is a ~12 MB download and NOAA reliably times out on it
+// (observed: HTTP 504 after 60s), which would put every lookup at its mercy.
+// A quarter-degree box is far wider than the match radius even at high latitude.
+const NWPS_BBOX_PAD_DEG = 0.25;
+
+async function findNwpsGaugeNear(lat, lng) {
+  const { data } = await axios.get(`${NWPS_BASE}/gauges`, {
+    params: {
+      srid: "EPSG_4326",
+      "bbox.xmin": lng - NWPS_BBOX_PAD_DEG,
+      "bbox.ymin": lat - NWPS_BBOX_PAD_DEG,
+      "bbox.xmax": lng + NWPS_BBOX_PAD_DEG,
+      "bbox.ymax": lat + NWPS_BBOX_PAD_DEG,
+    },
+    timeout: 20_000,
+  });
+  let best = null;
+  for (const g of data?.gauges || []) {
+    if (!g.lid || typeof g.latitude !== "number" || typeof g.longitude !== "number") continue;
+    const distance = haversineKm(lat, lng, g.latitude, g.longitude);
+    if (!best || distance < best.distance) best = { lid: g.lid, distance };
+  }
+  return best && best.distance <= NWPS_MAX_MATCH_KM ? best : null;
+}
+
+async function waterFloodRiskLogic({ site, lid }) {
+  if (!site && !lid) {
+    throw new HttpError(400, "Missing required query param: site (USGS site number, e.g. 01646500) or lid (NWS gauge ID, e.g. BRKM2)");
+  }
+  try {
+    let gaugeId = lid ? String(lid).trim().toUpperCase() : null;
+    let matchedBy = gaugeId ? "nws_lid" : null;
+    let matchDistanceKm = null;
+    let usgsReading = null;
+
+    if (!gaugeId) {
+      // Reuse the existing USGS handler: it yields the coordinates needed for the
+      // spatial match and the live readings used to cross-check NOAA below.
+      usgsReading = await waterStreamflowLogic({ site });
+      if (typeof usgsReading.lat !== "number" || typeof usgsReading.lng !== "number") {
+        throw new HttpError(404, `USGS site '${site}' has no coordinates, so it cannot be matched to an NWS flood gauge`);
+      }
+      const best = await findNwpsGaugeNear(usgsReading.lat, usgsReading.lng);
+      if (!best) {
+        throw new HttpError(404, `No NWS river gauge found within ${NWPS_MAX_MATCH_KM} km of USGS site '${site}'`);
+      }
+      gaugeId = best.lid;
+      matchDistanceKm = Math.round(best.distance * 1000) / 1000;
+      matchedBy = "coordinates";
+    }
+
+    let detail;
+    try {
+      detail = await axios.get(`${NWPS_BASE}/gauges/${encodeURIComponent(gaugeId)}`, { timeout: 20_000 });
+    } catch (err) {
+      // An unknown gauge id is a client error, not an upstream outage - without
+      // this it surfaces as a misleading 502 blaming NOAA.
+      if (err.response?.status === 404) throw new HttpError(404, `NWS gauge '${gaugeId}' not found`);
+      throw err;
+    }
+    const data = detail.data;
+    if (!data?.lid) throw new HttpError(404, `NWS gauge '${gaugeId}' not found`);
+
+    const categories = data.flood?.categories || {};
+    const floodStagesFt = {
+      action: nwpsNum(categories.action?.stage),
+      minor: nwpsNum(categories.minor?.stage),
+      moderate: nwpsNum(categories.moderate?.stage),
+      major: nwpsNum(categories.major?.stage),
+    };
+    // Reservoir-controlled and market-only gauges genuinely have no flood stages.
+    // Refuse rather than return a body of nulls - a 4xx does not settle payment,
+    // so the caller is not charged for an answer we cannot give.
+    if (Object.values(floodStagesFt).every((v) => v === null)) {
+      throw new HttpError(422, `NWS gauge '${gaugeId}' has no official flood stages defined, so flood risk cannot be assessed. This response is not charged for.`);
+    }
+
+    const obs = data.status?.observed || {};
+    const fct = data.status?.forecast || {};
+    const observedStageFt = nwpsNum(obs.primary);
+    const forecastStageFt = nwpsNum(fct.primary);
+
+    const feetBelowStage = {};
+    for (const [name, stage] of Object.entries(floodStagesFt)) {
+      feetBelowStage[name] =
+        stage !== null && observedStageFt !== null ? Math.round((stage - observedStageFt) * 100) / 100 : null;
+    }
+
+    let nextThreshold = null;
+    if (observedStageFt !== null) {
+      const upcoming = Object.entries(floodStagesFt)
+        .filter(([, stage]) => stage !== null && stage > observedStageFt)
+        .sort((a, b) => a[1] - b[1])[0];
+      if (upcoming) {
+        nextThreshold = {
+          name: upcoming[0],
+          stageFt: upcoming[1],
+          feetAway: Math.round((upcoming[1] - observedStageFt) * 100) / 100,
+        };
+      }
+    }
+
+    let trend = null;
+    if (observedStageFt !== null && forecastStageFt !== null) {
+      const delta = forecastStageFt - observedStageFt;
+      trend = Math.abs(delta) < 0.05 ? "steady" : delta > 0 ? "rising" : "falling";
+    }
+
+    return {
+      site: site ? String(site) : null,
+      gauge: {
+        lid: data.lid,
+        name: data.name || null,
+        usgsId: data.usgsId || null,
+        lat: typeof data.latitude === "number" ? data.latitude : null,
+        lng: typeof data.longitude === "number" ? data.longitude : null,
+        state: data.state?.abbreviation || null,
+        matchedBy,
+        matchDistanceKm,
+        // With matchedBy "coordinates" the gauge is only confirmed as the same
+        // station when NWPS reports the USGS id we asked for.
+        usgsIdConfirmed: site ? String(data.usgsId || "") === String(site) : null,
+      },
+      observed: {
+        stageFt: observedStageFt,
+        unit: obs.primaryUnit || null,
+        floodCategory: obs.floodCategory || null,
+        time: obs.validTime || null,
+      },
+      forecast: {
+        stageFt: forecastStageFt,
+        floodCategory: fct.floodCategory || null,
+        time: fct.validTime || null,
+      },
+      floodStagesFt,
+      feetBelowStage,
+      nextThreshold,
+      trend,
+      usgs: usgsReading
+        ? {
+            siteName: usgsReading.siteName,
+            streamflowCfs: usgsReading.streamflowCfs,
+            gaugeHeightFt: usgsReading.gaugeHeightFt,
+            time: usgsReading.time,
+          }
+        : null,
+      attribution: "Flood stages and categories from NOAA/NWS. USGS readings are provisional and subject to revision.",
+      source: "NOAA/NWS National Water Prediction Service; U.S. Geological Survey (USGS) National Water Information System",
+    };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream NOAA/USGS flood-risk lookup failed");
+  }
+}
+app.get("/water/flood-risk", (req, res) => runHandler(res, () => waterFloodRiskLogic(req.query)));
+
 // Vintage year = the API path segment and the end-year of the 5-year window.
 // Census releases a new 5-year ACS vintage annually (usually late January);
 // bump this one constant each year.
@@ -1476,6 +1701,7 @@ const MCP_TOOL_DEFS = [
   { path: "/treasury/debt", logic: treasuryDebtLogic },
   { path: "/ocean/tides", logic: oceanTidesLogic },
   { path: "/water/streamflow", logic: waterStreamflowLogic },
+  { path: "/water/flood-risk", logic: waterFloodRiskLogic },
   { path: "/payments/history", logic: paymentHistoryLogic },
   { path: "/sec/filings-search", logic: secFilingsSearchLogic },
   { path: "/census/demographics", logic: censusDemographicsLogic },
