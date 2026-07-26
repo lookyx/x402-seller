@@ -205,6 +205,13 @@ re-verifying against a live settlement first.
 
 ## Pricing models
 
-Currently using the `exact` scheme (fixed price/call) on every route for simplicity.
+Every route uses the `exact` scheme (fixed price/call) — no usage-based pricing yet.
+Price is no longer uniform across routes, though: most endpoints default to `$0.001`
+(`PRICE_PER_LOOKUP`), but a few have their own named price constant set higher based on
+real evidence (a competitor's actual on-chain settlement volume at that price, checked
+directly via `eth_getLogs` against their payout wallet — not just their listed price,
+which turned out to be a weak signal on its own). See `PRICE_SEC_FILINGS_SEARCH`,
+`PRICE_OIL`, `PRICE_CURRENCY_RATE`, and `PRICE_CHAIN_BALANCE` in `server.js`.
+
 x402 also supports `upto` (usage-based pricing) and batch settlement for high-frequency
 buyers — worth adopting once real traffic patterns justify it.
