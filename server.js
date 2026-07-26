@@ -589,6 +589,32 @@ const PAYMENT_ROUTES = {
       },
 };
 
+// Block HEAD on paid routes before the paywall runs. PAYMENT_ROUTES keys are
+// method-qualified ("GET /oil/price") and x402 matches them exactly, but
+// Express routes HEAD to app.get() handlers by default — so a HEAD skipped the
+// paywall entirely and ran the handler for free. No body is returned (HTTP
+// strips HEAD bodies), but it still burned upstream API quota on every call and
+// leaked an ETag, which is a content hash: polling HEAD revealed the exact
+// moment a price changed without paying. 405 rather than 402 because a paid
+// HEAD would settle a payment and return no data; clients that HEAD-then-GET
+// just fall through to the GET and get a proper 402.
+// Paths are normalized (lowercase, no trailing slash) to match Express's own
+// case-insensitive, trailing-slash-tolerant routing — otherwise "HEAD /Gas/Price"
+// would slip past this guard and still reach the handler.
+const normalizeRoutePath = (p) =>
+  (p.length > 1 ? p.replace(/\/+$/, "") : p).toLowerCase();
+
+const PAID_PATHS = new Set(
+  Object.keys(PAYMENT_ROUTES).map((key) => normalizeRoutePath(key.slice(key.indexOf(" ") + 1)))
+);
+
+app.use((req, res, next) => {
+  if (req.method === "HEAD" && PAID_PATHS.has(normalizeRoutePath(req.path))) {
+    return res.status(405).set("Allow", "GET").end();
+  }
+  next();
+});
+
 app.use(paymentMiddleware(PAYMENT_ROUTES, resourceServer));
 
 app.get("/", (req, res) => {
