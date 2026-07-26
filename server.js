@@ -50,6 +50,7 @@ const resourceServer = new x402ResourceServer(facilitatorClient)
   .registerExtension(bazaarResourceServerExtension);
 
 const PRICE_PER_LOOKUP = "$0.001";
+const PRICE_SEC_FILINGS_SEARCH = "$0.05";
 
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
@@ -533,7 +534,7 @@ const PAYMENT_ROUTES = {
         },
       },
       "GET /sec/filings-search": {
-        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        accepts: [{ scheme: "exact", price: PRICE_SEC_FILINGS_SEARCH, network: NETWORK, payTo: PAY_TO }],
         description: "Full-text search across every SEC EDGAR filing since 2001 (10-K, 10-Q, 8-K, and more) by keyword, company name, or topic. Returns matching filings: company name, ticker (if available), CIK, form type, filing date, accession number, SIC code, and a direct link to the filing. Optional forms filters by comma-separated form type(s); startdt/enddt filter by filing date (YYYY-MM-DD).",
         mimeType: "application/json",
         extensions: {

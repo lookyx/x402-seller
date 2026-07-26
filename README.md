@@ -26,7 +26,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /water/streamflow?site=...` | Real-time river streamflow + gauge height at US stream gauges (USGS) | $0.001 |
 | `GET /payments/history?hours=24&address=...` | This seller's own recent USDC settlement history on Base (self-referential, max 72h window) | $0.001 |
 | `GET /census/demographics?zip=...` | US Census ACS 5-Year population, median income, median age, and housing units by ZIP code (Census Bureau) | $0.001 |
-| `GET /sec/filings-search?q=...&forms=10-K` | Full-text search across all SEC EDGAR filings since 2001, by keyword/company/topic (SEC EDGAR) | $0.001 |
+| `GET /sec/filings-search?q=...&forms=10-K` | Full-text search across all SEC EDGAR filings since 2001, by keyword/company/topic (SEC EDGAR) | $0.05 |
 
 All data sources are either explicitly licensed for commercial resale (LocationIQ) or
 official public-domain government data with no redistribution restriction (EIA, NWS).
