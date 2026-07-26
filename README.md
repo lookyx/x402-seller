@@ -11,16 +11,16 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 |---|---|---|
 | `GET /geo/lookup?address=...` | Address → lat/lng + IANA timezone (LocationIQ) | $0.001 |
 | `GET /geo/reverse?lat=...&lng=...` | Coordinates → place name + timezone (LocationIQ) | $0.001 |
-| `GET /oil/price?benchmark=wti\|brent` | Latest daily WTI/Brent spot price (EIA) | $0.001 |
+| `GET /oil/price?benchmark=wti\|brent` | Latest daily WTI/Brent spot price (EIA) | $0.005 |
 | `GET /gas/price` | Latest Henry Hub natural gas spot price (EIA) | $0.001 |
 | `GET /electricity/price?state=US` | Latest US retail electricity price, national or by state (EIA) | $0.001 |
 | `GET /weather/forecast?lat=...&lng=...` | Official US weather forecast by coordinates (NWS/NOAA, US only) | $0.001 |
 | `GET /nuclear/outages` | Daily US nuclear plant outage data (NRC via EIA) | $0.001 |
 | `GET /earthquakes/recent?minmagnitude=...&limit=...` | Recent significant earthquakes worldwide (USGS) | $0.001 |
-| `GET /currency/rate?from=...&to=...` | Official daily FX rate between 30+ currencies (ECB) | $0.001 |
+| `GET /currency/rate?from=...&to=...` | Official daily FX rate between 30+ currencies (ECB) | $0.008 |
 | `GET /air/quality?lat=...&lng=...` | Current US air quality index readings (EPA AirNow) | $0.001 |
 | `GET /space/asteroids?date=...` | Near-Earth asteroids by closest approach date (NASA JPL) | $0.001 |
-| `GET /chain/balance?address=...&token=...` | Live ETH + ERC20 balance on Base mainnet (Base RPC) | $0.001 |
+| `GET /chain/balance?address=...&token=...` | Live ETH + ERC20 balance on Base mainnet (Base RPC) | $0.012 |
 | `GET /treasury/debt` | Latest total US national debt "to the penny" (US Treasury) | $0.001 |
 | `GET /ocean/tides?station=...` or `?lat=...&lng=...` | Tide predictions (next 48h) or latest water level at US coastal stations, nearest-station lookup by coordinates (NOAA CO-OPS) | $0.001 |
 | `GET /water/streamflow?site=...` | Real-time river streamflow + gauge height at US stream gauges (USGS) | $0.001 |

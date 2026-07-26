@@ -51,6 +51,9 @@ const resourceServer = new x402ResourceServer(facilitatorClient)
 
 const PRICE_PER_LOOKUP = "$0.001";
 const PRICE_SEC_FILINGS_SEARCH = "$0.05";
+const PRICE_OIL = "$0.005";
+const PRICE_CURRENCY_RATE = "$0.008";
+const PRICE_CHAIN_BALANCE = "$0.012";
 
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
@@ -103,7 +106,7 @@ const PAYMENT_ROUTES = {
         },
       },
       "GET /oil/price": {
-        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        accepts: [{ scheme: "exact", price: PRICE_OIL, network: NETWORK, payTo: PAY_TO }],
         description: "Current crude oil price in USD per barrel — WTI or Brent spot price from the U.S. Energy Information Administration (EIA). Reflects the latest official daily figure, not live or real-time trading data; lags the market by several business days.",
         mimeType: "application/json",
         extensions: {
@@ -246,7 +249,7 @@ const PAYMENT_ROUTES = {
         },
       },
       "GET /currency/rate": {
-        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        accepts: [{ scheme: "exact", price: PRICE_CURRENCY_RATE, network: NETWORK, payTo: PAY_TO }],
         description: "Currency exchange rate for converting between any two currencies (forex/FX rate), drawn from a set of 30+ major currencies, sourced from the European Central Bank's official daily reference rates. Updates once per business day (~16:00 CET) — not a live or intraday feed.",
         mimeType: "application/json",
         extensions: {
@@ -338,7 +341,7 @@ const PAYMENT_ROUTES = {
         },
       },
       "GET /chain/balance": {
-        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        accepts: [{ scheme: "exact", price: PRICE_CHAIN_BALANCE, network: NETWORK, payTo: PAY_TO }],
         description: "Check a wallet's live balance on Base mainnet: native ETH (e.g. to confirm it has enough for gas) plus an optional ERC20 token balance (e.g. USDC) when a token contract address is supplied. Sourced from Base's official public RPC.",
         mimeType: "application/json",
         extensions: {
