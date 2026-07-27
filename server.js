@@ -564,22 +564,37 @@ const PAYMENT_ROUTES = {
               example: {
                 location: { lat: 34.0522, lng: -118.2437, radiusKm: 100, minAcres: 10 },
                 activeFireCount: 2,
-                nearest: { name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35, discovered: "2026-07-21T18:04:00.000Z", lastUpdated: "2026-07-26T17:21:56.140Z", state: "US-CA" },
+                countTruncatedUpstream: false,
+                nearest: { name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35, discovered: "2026-07-21T18:04:00.000Z", lastUpdated: "2026-07-26T17:21:56.140Z", state: "US-CA", cause: "Undetermined", complexity: null },
                 largest: { name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35 },
+                listTruncated: false,
                 fires: [{ name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35 }],
-                fireWeather: { redFlagWarning: true, alerts: [{ event: "Red Flag Warning", headline: "Red Flag Warning in effect", expires: "2026-07-27T03:00:00Z" }] },
-                airQuality: { aqi: 55, category: "Moderate", reportingArea: "Los Angeles" },
-                disclaimer: "Incident data is dynamic, provisional and not a legal document. Not for emergency or evacuation decisions.",
+                fireWeather: { redFlagWarning: true, alerts: [{ event: "Red Flag Warning", headline: "Red Flag Warning in effect", severity: "Severe", expires: "2026-07-27T03:00:00Z" }] },
+                airQuality: { aqi: 55, category: "Moderate", pollutant: "PM2.5", reportingArea: "Los Angeles" },
+                criteria: "Wildfire incidents over 10 acres, not fully contained, still open, and updated within 14 days.",
+                disclaimer: "Incident data is dynamic, provisional and not a legal document. NIFC gives no warranty as to accuracy or completeness. Not for emergency, evacuation or life-safety decisions.",
+                attribution: "Wildfire incident data courtesy of the National Interagency Fire Center (WFIGS), sourced from IRWIN and the interagency wildland fire community.",
                 source: "National Interagency Fire Center (WFIGS); National Weather Service (NOAA); U.S. EPA AirNow",
               },
               schema: {
                 properties: {
                   location: { type: "object" },
                   activeFireCount: { type: "number" },
+                  // True when the upstream itself capped the result, meaning
+                  // activeFireCount is a floor rather than an exact count.
+                  countTruncatedUpstream: { type: "boolean" },
+                  // null when no active fire matched inside the radius.
                   nearest: { type: ["object", "null"] }, largest: { type: ["object", "null"] },
+                  // `fires` holds the nearest 20 only; listTruncated says whether
+                  // activeFireCount exceeds that, so the two never look contradictory.
+                  listTruncated: { type: "boolean" },
                   fires: { type: "array" },
+                  // Both are best-effort enrichments and are null if the upstream
+                  // is unavailable or has no monitor near the point.
                   fireWeather: { type: ["object", "null"] }, airQuality: { type: ["object", "null"] },
-                  disclaimer: { type: "string" }, source: { type: "string" },
+                  // States exactly which filters produced activeFireCount.
+                  criteria: { type: "string" },
+                  disclaimer: { type: "string" }, attribution: { type: "string" }, source: { type: "string" },
                 },
               },
             },
@@ -1813,7 +1828,10 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
           name: a.IncidentName || null,
           distanceKm: hasGeo ? Math.round(haversineKm(latNum, lngNum, g.y, g.x) * 10) / 10 : null,
           bearing: hasGeo ? bearingFrom(latNum, lngNum, g.y, g.x) : null,
-          acres: typeof a.IncidentSize === "number" ? Math.round(a.IncidentSize) : null,
+          // Keep two decimals: rounding to an integer renders a 0.01-acre
+          // incipient report as "0 acres", which reads as bad data rather than
+          // a very small fire.
+          acres: typeof a.IncidentSize === "number" ? Math.round(a.IncidentSize * 100) / 100 : null,
           percentContained: typeof a.PercentContained === "number" ? a.PercentContained : null,
           discovered: a.FireDiscoveryDateTime ? new Date(a.FireDiscoveryDateTime).toISOString() : null,
           lastUpdated: a.ModifiedOnDateTime_dt ? new Date(a.ModifiedOnDateTime_dt).toISOString() : null,
