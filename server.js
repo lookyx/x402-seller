@@ -1758,7 +1758,11 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
       ` AND FireOutDateTime IS NULL` +
       ` AND ModifiedOnDateTime_dt > DATE '${since}'`;
 
-    const { data } = await axios.get(WFIGS_INCIDENTS, {
+    // Every upstream this project uses has been observed failing transiently and
+    // recovering seconds later (USGS, EIA, NOAA, AirNow and NIFC all did so in a
+    // single night). A lone blip here 502s a paid request, so retry once before
+    // giving up. Cheap: the retry only runs on the failure path.
+    const fetchIncidents = async () => axios.get(WFIGS_INCIDENTS, {
       params: {
         geometry: JSON.stringify({ x: lngNum, y: latNum, spatialReference: { wkid: 4326 } }),
         geometryType: "esriGeometryPoint",
@@ -1787,8 +1791,17 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
       },
       timeout: 20_000,
     });
+
+    let data;
+    try {
+      ({ data } = await fetchIncidents());
+    } catch (first) {
+      await new Promise((r) => setTimeout(r, 400));
+      ({ data } = await fetchIncidents());
+    }
     // ArcGIS reports failures as HTTP 200 with an `error` object - the same trap
-    // class as Census and SEC EDGAR.
+    // class as Census and SEC EDGAR. A malformed query is deterministic, so it is
+    // NOT retried; only transport-level failures above are.
     if (data?.error) throw new HttpError(502, `NIFC query rejected: ${data.error.message || "unknown error"}`);
 
     const fires = (data?.features || [])
