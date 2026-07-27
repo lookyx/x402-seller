@@ -1736,7 +1736,12 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
   const latNum = Number(lat);
   const lngNum = Number(lng);
   if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) throw new HttpError(400, "lat and lng must be numbers");
-  const radius = Math.min(Math.max(Number(radiusKm) || 100, 1), 500);
+  if (latNum < -90 || latNum > 90) throw new HttpError(400, "lat must be between -90 and 90");
+  if (lngNum < -180 || lngNum > 180) throw new HttpError(400, "lng must be between -180 and 180");
+  // Number.isFinite rather than `||`: radiusKm=0 is falsy and would silently
+  // become the 100 km default instead of being clamped to the 1 km minimum.
+  const parsedRadius = Number(radiusKm);
+  const radius = Number.isFinite(parsedRadius) ? Math.min(Math.max(parsedRadius, 1), 500) : 100;
   // Number(undefined) is NaN and ?? does not catch NaN, so a missing minAcres
   // would build "IncidentSize > NaN" and ArcGIS rejects the whole query.
   const parsedFloor = Number(minAcres);
@@ -1769,7 +1774,15 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
         returnGeometry: "true",
         outSR: "4326",
         f: "json",
-        resultRecordCount: "50",
+        // The layer's maxRecordCount is 2000 and there are only ~200 genuinely
+        // active fires nationally, so no radius can overflow this. A 50-record
+        // cap silently undercounted (Central Oregon at 300 km has 55 fires, at
+        // 500 km it has 81) AND, because the cap selected the LARGEST fires,
+        // could drop the closest one - making `nearest` wrong exactly where the
+        // endpoint matters most.
+        resultRecordCount: "2000",
+        // Only a tiebreak if the 2000 ceiling is ever somehow hit; the real
+        // ordering is by distance, applied below.
         orderByFields: "IncidentSize DESC",
       },
       timeout: 20_000,
@@ -1811,8 +1824,14 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
     return {
       location: { lat: latNum, lng: lngNum, radiusKm: radius, minAcres: floor },
       activeFireCount: fires.length,
+      // True if the upstream itself hit a limit, meaning activeFireCount is a
+      // floor rather than an exact count. Should never fire in practice, but
+      // reporting a capped number as exact is precisely the bug being fixed.
+      countTruncatedUpstream: data?.exceededTransferLimit === true,
       nearest: fires[0] || null,
       largest,
+      // `fires` is the nearest 20; activeFireCount above is the full total.
+      listTruncated: fires.length > 20,
       fires: fires.slice(0, 20),
       fireWeather,
       airQuality,
