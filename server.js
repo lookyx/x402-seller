@@ -569,6 +569,8 @@ const PAYMENT_ROUTES = {
                 largest: { name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35 },
                 listTruncated: false,
                 fires: [{ name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35 }],
+                belowMinAcresCount: 8,
+                nearestBelowMinAcres: { name: "LAC-260688", distanceKm: 21.4, bearing: "E", acres: 0.01, percentContained: null },
                 fireWeather: { redFlagWarning: true, alerts: [{ event: "Red Flag Warning", headline: "Red Flag Warning in effect", severity: "Severe", expires: "2026-07-27T03:00:00Z" }] },
                 airQuality: { aqi: 55, category: "Moderate", pollutant: "PM2.5", reportingArea: "Los Angeles" },
                 criteria: "Wildfire incidents over 10 acres, not fully contained, still open, and updated within 14 days.",
@@ -589,6 +591,11 @@ const PAYMENT_ROUTES = {
                   // activeFireCount exceeds that, so the two never look contradictory.
                   listTruncated: { type: "boolean" },
                   fires: { type: "array" },
+                  // Active fires excluded only for being under minAcres, plus the
+                  // closest of them - so "nothing burning" is distinguishable
+                  // from "something small was filtered out".
+                  belowMinAcresCount: { type: "number" },
+                  nearestBelowMinAcres: { type: ["object", "null"] },
                   // Both are best-effort enrichments and are null if the upstream
                   // is unavailable or has no monitor near the point.
                   fireWeather: { type: ["object", "null"] }, airQuality: { type: ["object", "null"] },
@@ -1766,9 +1773,15 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
     // ArcGIS needs a DATE 'yyyy-mm-dd' literal here; passing epoch millis returns
     // an error object rather than filtering, which reads as an empty result.
     const since = new Date(Date.now() - WFIGS_RECENT_DAYS * 86_400_000).toISOString().slice(0, 10);
+    // Deliberately NOT filtered by size upstream. Partitioning client-side costs
+    // nothing extra and lets the response report how many fires fell below
+    // minAcres - otherwise the default silently hides a closer small fire and the
+    // caller has no way to know it should widen. Reporting "0 nearby" when
+    // something smaller is burning 48 km away is the kind of confident wrong
+    // answer this endpoint must not give.
     const where =
       `IncidentTypeCategory='WF'` +
-      ` AND IncidentSize > ${floor}` +
+      ` AND IncidentSize > 0` +
       ` AND (PercentContained < 100 OR PercentContained IS NULL)` +
       ` AND FireOutDateTime IS NULL` +
       ` AND ModifiedOnDateTime_dt > DATE '${since}'`;
@@ -1819,7 +1832,7 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
     // NOT retried; only transport-level failures above are.
     if (data?.error) throw new HttpError(502, `NIFC query rejected: ${data.error.message || "unknown error"}`);
 
-    const fires = (data?.features || [])
+    const allFires = (data?.features || [])
       .map((f) => {
         const a = f.attributes || {};
         const g = f.geometry || {};
@@ -1843,6 +1856,10 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
       .filter((f) => f.distanceKm === null || f.distanceKm <= radius)
       .sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
 
+    const fires = allFires.filter((f) => (f.acres ?? 0) >= floor);
+    const belowFloor = allFires.filter((f) => (f.acres ?? 0) < floor);
+    const nearestBelowFloor = belowFloor[0] || null;
+
     const [fireWeather, airQuality] = await Promise.all([
       bestEffort(fireWeatherFor(latNum, lngNum)),
       bestEffort(smokeProxyFor(latNum, lngNum)),
@@ -1864,6 +1881,11 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
       // `fires` is the nearest 20; activeFireCount above is the full total.
       listTruncated: fires.length > 20,
       fires: fires.slice(0, 20),
+      // How many active fires were excluded purely for being under minAcres, and
+      // the closest of them. Without this a caller cannot tell "nothing is
+      // burning" apart from "something small is burning and we hid it".
+      belowMinAcresCount: belowFloor.length,
+      nearestBelowMinAcres: nearestBelowFloor,
       fireWeather,
       airQuality,
       // Deliberately no synthesised risk score. NIFC's licence forbids presenting
