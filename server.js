@@ -76,6 +76,12 @@ const PRICE_CHAIN_BALANCE = "$0.012";
 // deliberate: the comparable is what a buyer already pays for this answer, not
 // what the median listing (which mostly earns nothing) asks for.
 const PRICE_FLOOD_RISK = "$0.31";
+// Composite signal across three sources (NIFC incidents + NWS fire weather +
+// AirNow smoke), priced above /water/flood-risk to reflect that. Set by the
+// owner. Note there is no audited competitor revenue for wildfire specifically -
+// unlike SEC EDGAR and flood risk, this price rests on the composite-signal
+// argument rather than on an observed comparable.
+const PRICE_FIRE_RISK = "$0.39";
 
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
@@ -538,6 +544,48 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
+      "GET /fire/risk": {
+        accepts: [{ scheme: "exact", price: PRICE_FIRE_RISK, network: NETWORK, payTo: PAY_TO }],
+        description: "Active US wildfires near a location, with distance, bearing, size in acres and containment percent for the nearest and largest, plus any National Weather Service Red Flag Warning in force and current air quality as a smoke indicator. Answers \"is there a wildfire near this place right now\". Official incident data, not a legal or emergency source.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { lat: "34.0522", lng: "-118.2437" },
+            inputSchema: {
+              properties: {
+                lat: { type: "string", description: "Latitude" },
+                lng: { type: "string", description: "Longitude" },
+                radiusKm: { type: "string", description: "Search radius in km (default 100, max 500)" },
+                minAcres: { type: "string", description: "Ignore fires smaller than this (default 10)" },
+              },
+              required: ["lat", "lng"],
+            },
+            output: {
+              example: {
+                location: { lat: 34.0522, lng: -118.2437, radiusKm: 100, minAcres: 10 },
+                activeFireCount: 2,
+                nearest: { name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35, discovered: "2026-07-21T18:04:00.000Z", lastUpdated: "2026-07-26T17:21:56.140Z", state: "US-CA" },
+                largest: { name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35 },
+                fires: [{ name: "SUMMIT", distanceKm: 42.1, bearing: "NE", acres: 2690, percentContained: 35 }],
+                fireWeather: { redFlagWarning: true, alerts: [{ event: "Red Flag Warning", headline: "Red Flag Warning in effect", expires: "2026-07-27T03:00:00Z" }] },
+                airQuality: { aqi: 55, category: "Moderate", reportingArea: "Los Angeles" },
+                disclaimer: "Incident data is dynamic, provisional and not a legal document. Not for emergency or evacuation decisions.",
+                source: "National Interagency Fire Center (WFIGS); National Weather Service (NOAA); U.S. EPA AirNow",
+              },
+              schema: {
+                properties: {
+                  location: { type: "object" },
+                  activeFireCount: { type: "number" },
+                  nearest: { type: ["object", "null"] }, largest: { type: ["object", "null"] },
+                  fires: { type: "array" },
+                  fireWeather: { type: ["object", "null"] }, airQuality: { type: ["object", "null"] },
+                  disclaimer: { type: "string" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
       "GET /payments/history": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
         description: "This seller's own recent USDC settlement history on Base mainnet — every payment received, with transaction hash, payer address, amount, and block number. Use it to confirm whether a specific payment settled, or to audit real payment volume; verifiable on any Base block explorer. Bounded to a recent rolling window (default 24h, max 72h) to keep responses fast. Optional 'address' param filters to one payer wallet.",
@@ -689,6 +737,7 @@ app.get("/", (req, res) => {
       "GET /ocean/tides?station=... or lat=...&lng=... (&product=predictions|water_level, US coastal stations)",
       "GET /water/streamflow?site=09380000 (US stream gauges)",
       "GET /water/flood-risk?site=01646500 (river level vs official NWS flood stages)",
+      "GET /fire/risk?lat=34.0522&lng=-118.2437 (active wildfires near a point, with fire weather)",
       "GET /payments/history?hours=24&address=0x... (this seller's own settlement history, max 72h)",
       "GET /census/demographics?zip=10001 (US Census ACS 5-Year population/income/age/housing by ZIP)",
       "GET /sec/filings-search?q=chip+shortage&forms=10-K (full-text search across all SEC EDGAR filings since 2001)",
@@ -698,7 +747,7 @@ app.get("/", (req, res) => {
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   });
 });
 
@@ -729,6 +778,7 @@ const ROUTE_META = {
   "/ocean/tides": { operationId: "oceanTides", summary: "US tide predictions and observed water levels", tags: ["ocean", "weather"] },
   "/water/streamflow": { operationId: "waterStreamflow", summary: "Real-time US river streamflow and gauge height", tags: ["water", "environment"] },
   "/water/flood-risk": { operationId: "waterFloodRisk", summary: "US river level vs official NWS flood stages, with flood category and trend", tags: ["water", "environment", "risk"] },
+  "/fire/risk": { operationId: "fireRisk", summary: "Active US wildfires near a location, with fire weather and smoke", tags: ["fire", "environment", "risk"] },
   "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ["finance", "transparency"] },
   "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ["geo", "government", "demographics"] },
   "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ["finance", "government"] },
@@ -798,7 +848,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: "19 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
+    summary: "20 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
@@ -816,7 +866,7 @@ function buildX402Manifest() {
       remoteNote: "Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs $0.001 in USDC on Base, paid in-band via x402 (_meta[\"x402/payment\"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.",
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather and tide data from NOAA. Earthquake and streamflow data from USGS. Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   };
 }
 
@@ -1612,6 +1662,177 @@ async function waterFloodRiskLogic({ site, lid }) {
 }
 app.get("/water/flood-risk", (req, res) => runHandler(res, () => waterFloodRiskLogic(req.query)));
 
+// --- /fire/risk ---------------------------------------------------------------
+// NIFC's Wildland Fire Interagency Geospatial Services (WFIGS) publishes the
+// authoritative US wildfire incident feed. US federal interagency data, public
+// domain, no API key. Its licence is a liability disclaimer rather than a use
+// restriction, but it does require that consumers not present the data as
+// authoritative or legal - hence the mandatory disclaimer on every response.
+const WFIGS_INCIDENTS =
+  "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query";
+const WFIGS_DISCLAIMER =
+  "Incident data is dynamic, provisional and not a legal document. NIFC gives no warranty as to accuracy or completeness. Not for emergency, evacuation or life-safety decisions.";
+const WFIGS_ATTRIBUTION =
+  "Wildfire incident data courtesy of the National Interagency Fire Center (WFIGS), sourced from IRWIN and the interagency wildland fire community.";
+// The "Current" layer holds the whole season, so it still contains fires that
+// are long contained - Morrill sat in it at 642,029 acres, discovered in March
+// and 100% contained. Without these filters the endpoint reports a months-old
+// contained fire as a live threat.
+const WFIGS_RECENT_DAYS = 14;
+
+const COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+function bearingFrom(lat1, lng1, lat2, lng2) {
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLng = rad(lng2 - lng1);
+  const y = Math.sin(dLng) * Math.cos(rad(lat2));
+  const x = Math.cos(rad(lat1)) * Math.sin(rad(lat2)) - Math.sin(rad(lat1)) * Math.cos(rad(lat2)) * Math.cos(dLng);
+  const deg = (Math.atan2(y, x) * 180) / Math.PI;
+  return COMPASS[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
+}
+
+// The two enrichment lookups are best-effort, so they must also be bounded:
+// airQualityLogic sets no axios timeout of its own, and AirNow was observed
+// hanging ~30s on remote coordinates, which would drag a paid response out with
+// it. Losing the race yields null; the abandoned request is simply ignored.
+const bestEffort = (promise, ms = 8000) =>
+  Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(null), ms))]);
+
+// Best-effort: NWS fire-weather alerts for the point. A failure here must not
+// sink the whole answer, so it degrades to null rather than throwing.
+async function fireWeatherFor(lat, lng) {
+  try {
+    const { data } = await axios.get("https://api.weather.gov/alerts/active", {
+      params: { point: `${lat},${lng}` },
+      headers: { "User-Agent": NWS_USER_AGENT },
+      timeout: 12_000,
+    });
+    const alerts = (data?.features || [])
+      .map((f) => f.properties || {})
+      .filter((p) => /fire|red flag/i.test(p.event || ""))
+      .map((p) => ({ event: p.event, headline: p.headline || null, severity: p.severity || null, expires: p.expires || null }));
+    return { redFlagWarning: alerts.some((a) => /red flag/i.test(a.event)), alerts };
+  } catch {
+    return null;
+  }
+}
+
+// Best-effort smoke proxy, reusing the existing AirNow handler. It legitimately
+// 404s where there are no monitors (San Francisco reports none at any radius),
+// so absence is normal and must not fail the request.
+async function smokeProxyFor(lat, lng) {
+  try {
+    const aq = await airQualityLogic({ lat, lng });
+    const readings = (aq.readings || []).filter((r) => typeof r.aqi === "number");
+    if (!readings.length) return null;
+    const worst = readings.reduce((a, b) => (b.aqi > a.aqi ? b : a));
+    return { aqi: worst.aqi, category: worst.category || null, pollutant: worst.pollutant || null, reportingArea: aq.reportingArea || null };
+  } catch {
+    return null;
+  }
+}
+
+async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
+  if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) throw new HttpError(400, "lat and lng must be numbers");
+  const radius = Math.min(Math.max(Number(radiusKm) || 100, 1), 500);
+  // Number(undefined) is NaN and ?? does not catch NaN, so a missing minAcres
+  // would build "IncidentSize > NaN" and ArcGIS rejects the whole query.
+  const parsedFloor = Number(minAcres);
+  const floor = Number.isFinite(parsedFloor) ? Math.max(parsedFloor, 0) : 10;
+
+  try {
+    // ArcGIS needs a DATE 'yyyy-mm-dd' literal here; passing epoch millis returns
+    // an error object rather than filtering, which reads as an empty result.
+    const since = new Date(Date.now() - WFIGS_RECENT_DAYS * 86_400_000).toISOString().slice(0, 10);
+    const where =
+      `IncidentTypeCategory='WF'` +
+      ` AND IncidentSize > ${floor}` +
+      ` AND (PercentContained < 100 OR PercentContained IS NULL)` +
+      ` AND FireOutDateTime IS NULL` +
+      ` AND ModifiedOnDateTime_dt > DATE '${since}'`;
+
+    const { data } = await axios.get(WFIGS_INCIDENTS, {
+      params: {
+        geometry: JSON.stringify({ x: lngNum, y: latNum, spatialReference: { wkid: 4326 } }),
+        geometryType: "esriGeometryPoint",
+        inSR: "4326",
+        distance: String(radius * 1000),
+        units: "esriSRUnit_Meter",
+        spatialRel: "esriSpatialRelIntersects",
+        where,
+        // IncidentSize is the CURRENT size. DiscoveryAcres is size at discovery
+        // and reads 0.01 on most records - using it reports a 280,000-acre fire
+        // as a hundredth of an acre.
+        outFields: "IncidentName,IncidentSize,PercentContained,FireDiscoveryDateTime,ModifiedOnDateTime_dt,POOState,FireCause,IncidentComplexityLevel",
+        returnGeometry: "true",
+        outSR: "4326",
+        f: "json",
+        resultRecordCount: "50",
+        orderByFields: "IncidentSize DESC",
+      },
+      timeout: 20_000,
+    });
+    // ArcGIS reports failures as HTTP 200 with an `error` object - the same trap
+    // class as Census and SEC EDGAR.
+    if (data?.error) throw new HttpError(502, `NIFC query rejected: ${data.error.message || "unknown error"}`);
+
+    const fires = (data?.features || [])
+      .map((f) => {
+        const a = f.attributes || {};
+        const g = f.geometry || {};
+        const hasGeo = typeof g.y === "number" && typeof g.x === "number";
+        return {
+          name: a.IncidentName || null,
+          distanceKm: hasGeo ? Math.round(haversineKm(latNum, lngNum, g.y, g.x) * 10) / 10 : null,
+          bearing: hasGeo ? bearingFrom(latNum, lngNum, g.y, g.x) : null,
+          acres: typeof a.IncidentSize === "number" ? Math.round(a.IncidentSize) : null,
+          percentContained: typeof a.PercentContained === "number" ? a.PercentContained : null,
+          discovered: a.FireDiscoveryDateTime ? new Date(a.FireDiscoveryDateTime).toISOString() : null,
+          lastUpdated: a.ModifiedOnDateTime_dt ? new Date(a.ModifiedOnDateTime_dt).toISOString() : null,
+          state: a.POOState || null,
+          cause: a.FireCause || null,
+          complexity: a.IncidentComplexityLevel || null,
+        };
+      })
+      .filter((f) => f.distanceKm === null || f.distanceKm <= radius)
+      .sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+
+    const [fireWeather, airQuality] = await Promise.all([
+      bestEffort(fireWeatherFor(latNum, lngNum)),
+      bestEffort(smokeProxyFor(latNum, lngNum)),
+    ]);
+
+    const largest = fires.length
+      ? fires.reduce((a, b) => ((b.acres ?? -1) > (a.acres ?? -1) ? b : a))
+      : null;
+
+    return {
+      location: { lat: latNum, lng: lngNum, radiusKm: radius, minAcres: floor },
+      activeFireCount: fires.length,
+      nearest: fires[0] || null,
+      largest,
+      fires: fires.slice(0, 20),
+      fireWeather,
+      airQuality,
+      // Deliberately no synthesised risk score. NIFC's licence forbids presenting
+      // this as authoritative, and an invented severity rating in a life-safety
+      // domain invites exactly the reliance the disclaimer warns against. Report
+      // verifiable facts and leave the judgement to the caller.
+      criteria: `Wildfire incidents over ${floor} acres, not fully contained, still open, and updated within ${WFIGS_RECENT_DAYS} days.`,
+      disclaimer: WFIGS_DISCLAIMER,
+      attribution: WFIGS_ATTRIBUTION,
+      source: "National Interagency Fire Center (WFIGS); National Weather Service (NOAA); U.S. EPA AirNow",
+    };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream NIFC wildfire lookup failed");
+  }
+}
+app.get("/fire/risk", (req, res) => runHandler(res, () => fireRiskLogic(req.query)));
+
 // Vintage year = the API path segment and the end-year of the 5-year window.
 // Census releases a new 5-year ACS vintage annually (usually late January);
 // bump this one constant each year.
@@ -1741,6 +1962,7 @@ const MCP_TOOL_DEFS = [
   { path: "/ocean/tides", logic: oceanTidesLogic },
   { path: "/water/streamflow", logic: waterStreamflowLogic },
   { path: "/water/flood-risk", logic: waterFloodRiskLogic },
+  { path: "/fire/risk", logic: fireRiskLogic },
   { path: "/payments/history", logic: paymentHistoryLogic },
   { path: "/sec/filings-search", logic: secFilingsSearchLogic },
   { path: "/census/demographics", logic: censusDemographicsLogic },

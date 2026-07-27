@@ -46,6 +46,10 @@ const ROUTES = [
   // reservoir-controlled, has no official NWS flood stages, and correctly
   // returns 422 without settling. It would read as a regression here.
   "/water/flood-risk?site=01646500",
+  // Any US coordinate is a safe fixture here: zero nearby fires is a valid 200,
+  // not an error, so this cannot produce the phantom failure that the old San
+  // Francisco /air/quality fixture did.
+  "/fire/risk?lat=34.0522&lng=-118.2437",
   "/payments/history?hours=24",
   "/census/demographics?zip=10001",
   "/sec/filings-search?q=chip%20shortage&forms=10-K",
