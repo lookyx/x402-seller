@@ -69,6 +69,11 @@ const PRICE_SEC_FILINGS_SEARCH = "$0.05";
 const PRICE_OIL = "$0.005";
 const PRICE_CURRENCY_RATE = "$0.008";
 const PRICE_CHAIN_BALANCE = "$0.012";
+// Raised from the $0.001 default after this route took the project's first
+// organic sale (2026-07-27). $0.01 is the catalog median, so it stays mid-market
+// rather than premium. Note the sole known buyer paid $0.001, so this is a
+// deliberate bet that demand survives a 10x - watch whether they return.
+const PRICE_WEATHER_FORECAST = "$0.01";
 // Interpreted-signal route rather than a raw lookup, so it is priced off the
 // audited competitor selling the same USGS/NOAA feeds as a flood-risk answer,
 // matching the ~$0.31/call they actually settle on-chain rather than this
@@ -200,7 +205,7 @@ const PAYMENT_ROUTES = {
         },
       },
       "GET /weather/forecast": {
-        accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
+        accepts: [{ scheme: "exact", price: PRICE_WEATHER_FORECAST, network: NETWORK, payTo: PAY_TO }],
         description: "Official U.S. National Weather Service (NWS) forecast for the next period — the nearest upcoming forecast window, e.g. today, tonight, or tomorrow — at a given latitude/longitude. US locations only. Use /geo/lookup first if you only have an address.",
         mimeType: "application/json",
         extensions: {
