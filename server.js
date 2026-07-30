@@ -11,6 +11,7 @@ import { declareDiscoveryExtension, bazaarResourceServerExtension, withBazaar } 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createPaymentWrapper } from "@x402/mcp";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 const PORT = process.env.PORT || 4021;
@@ -49,8 +50,49 @@ app.use((req, res, next) => {
   const startedAt = Date.now();
   res.on("finish", () => {
     const ms = Date.now() - startedAt;
-    console.log(`[REQ] ${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms ip=${req.ip} ua="${req.get("user-agent") || ""}"`);
+    console.log(`[REQ] ${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms ip=${req.ip} ua="${req.get("user-agent") || ""}" rid=${res.getHeader("x-request-id") || "-"}`);
   });
+  next();
+});
+
+// Verifiability headers. Lets a buyer, router or index prove which call it made
+// and that the bytes it received are the bytes we sent. Deliberately
+// header-only: putting these in response bodies would drift from the advertised
+// Bazaar/OpenAPI `example` blocks on all 20 routes, which is a real bug class
+// (an agent reads the example to decide how to parse us), not a docs nit.
+//
+// Must stay BEFORE paymentMiddleware: the `PAYMENT-RESPONSE` mirror below works
+// by intercepting res.setHeader, and x402 sets that header during settlement
+// (@x402/express L341-343) just before it replays the buffered response body
+// (L357-364) -- so the alias lands on the wire, but only if we wrapped first.
+const REQUEST_ID_MAX = 128;
+const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]+$/;
+
+app.use((req, res, next) => {
+  // An inbound header is untrusted input. Node throws on CR/LF in a header
+  // value, which would turn a hostile request id into a 500, so validate
+  // against a strict allowlist and fall back to a generated id.
+  const inbound = req.get("x-request-id");
+  const requestId =
+    inbound && inbound.length <= REQUEST_ID_MAX && SAFE_REQUEST_ID.test(inbound)
+      ? inbound
+      : randomUUID();
+  res.setHeader("x-request-id", requestId);
+  res.setHeader("x-payment-network", NETWORK); // CAIP-2, e.g. eip155:8453
+
+  // @x402/core 2.18 emits the settlement receipt as `PAYMENT-RESPONSE`, but
+  // parts of the ecosystem (Agent402's router among them) still read the legacy
+  // `X-PAYMENT-RESPONSE` name -- x402's own client checks both. Mirror it so the
+  // settle tx is visible either way; without this a buyer reading only the
+  // prefixed name concludes we return no receipt at all.
+  const setHeaderDirect = res.setHeader.bind(res);
+  res.setHeader = function (name, value) {
+    const result = setHeaderDirect(name, value);
+    if (typeof name === "string" && name.toLowerCase() === "payment-response") {
+      setHeaderDirect("X-PAYMENT-RESPONSE", value);
+    }
+    return result;
+  };
   next();
 });
 
@@ -919,13 +961,24 @@ class HttpError extends Error {
   }
 }
 
+// Serialises once and hashes the exact bytes that go on the wire, so
+// `x-response-hash` is verifiable by the caller. Deliberately does NOT use
+// res.json(), which would re-serialise and could in principle produce different
+// bytes than the ones we hashed (json spaces/replacer settings) -- a hash that
+// doesn't match the body is worse than no hash, because it reads as tampering.
+function sendJson(res, status, body) {
+  const raw = JSON.stringify(body);
+  res.setHeader("x-response-hash", `sha256:${createHash("sha256").update(raw).digest("hex")}`);
+  return res.status(status).type("json").send(raw);
+}
+
 async function runHandler(res, fn) {
   try {
-    res.json(await fn());
+    sendJson(res, 200, await fn());
   } catch (err) {
-    if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+    if (err instanceof HttpError) return sendJson(res, err.status, { error: err.message });
     console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "Internal error" });
+    sendJson(res, 500, { error: "Internal error" });
   }
 }
 
