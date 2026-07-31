@@ -129,6 +129,21 @@ const PRICE_FLOOD_RISK = "$0.31";
 // unlike SEC EDGAR and flood risk, this price rests on the composite-signal
 // argument rather than on an observed comparable.
 const PRICE_FIRE_RISK = "$0.39";
+// Composite signal across three NOAA SWPC feeds (planetary Kp + GOES X-ray flare
+// + active alerts). Set to $0.51 by explicit owner decision on 2026-07-30, making
+// it the most expensive route in the catalog, above /fire/risk at $0.39.
+//
+// Recorded honestly so a future session does not mistake this for evidence-based
+// pricing: there is NO audited competitor revenue for space weather. That is the
+// same position /fire/risk was in, and /fire/risk has drawn zero organic payers
+// at $0.39, while the only thing that has ever actually sold here was a $0.001
+// lookup. A $0.02 median-band price was recommended and declined. This rests on
+// the composite-signal argument alone.
+//
+// One constraint it does satisfy: Agent402's router leaderboard caps counted
+// calls at maxCallUsd 0.75, so $0.51 still accrues to seller standing there.
+// Anything above $0.75 would silently stop counting.
+const PRICE_SPACE_WEATHER = "$0.51";
 
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
@@ -442,6 +457,67 @@ const PAYMENT_ROUTES = {
                   address: { type: "string" }, network: { type: "string" },
                   ethBalance: { type: "number" }, token: { type: ["object", "null"] },
                   source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
+      "GET /space/weather": {
+        accepts: [{ scheme: "exact", price: PRICE_SPACE_WEATHER, network: NETWORK, payTo: PAY_TO }],
+        description: "Current space weather conditions from NOAA SWPC in one call: planetary Kp index mapped to the official NOAA G-scale geomagnetic storm level, the latest GOES solar X-ray flare with both its current and peak class, and active SWPC alerts and warnings from the last 24 hours. Useful for satellite operations, GPS accuracy, HF radio, polar aviation routes and power-grid impact monitoring.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { alertWindowHours: "24" },
+            inputSchema: {
+              properties: { alertWindowHours: { type: "string", description: "How far back to include SWPC alerts, in hours (1-168, default 24)" } },
+              required: [],
+            },
+            output: {
+              example: {
+                geomagnetic: {
+                  kpIndex: 0, estimatedKp: 0, stormLevel: "G0", stormLabel: "None",
+                  measuredAt: "2026-07-30T22:13:00Z",
+                },
+                solarFlare: {
+                  currentClass: "C2.1", peakClass: "M1.9", significance: "moderate",
+                  beganAt: "2026-07-30T15:53:00Z", peakAt: "2026-07-30T17:00:00Z",
+                  endedAt: null, ongoing: true, satellite: 18,
+                },
+                alerts: [{ productId: "ALTPX1", issuedAt: "2026-07-30T19:03:19Z", code: "ALTPX1", summary: "Proton Event 10MeV Integral Flux exceeded 10pfu" }],
+                alertWindowHours: 24, alertsInWindow: 3, alertsExcludedOutsideWindow: 114, alertsAvailable: true,
+                source: "NOAA Space Weather Prediction Center (SWPC)",
+                attribution: "Space weather data from NOAA SWPC (public domain).",
+                disclaimer: "Not an official NOAA product. For authoritative alerts see swpc.noaa.gov.",
+              },
+              schema: {
+                properties: {
+                  geomagnetic: {
+                    type: "object",
+                    properties: {
+                      kpIndex: { type: ["number", "null"] }, estimatedKp: { type: ["number", "null"] },
+                      stormLevel: { type: ["string", "null"] }, stormLabel: { type: ["string", "null"] },
+                      measuredAt: { type: ["string", "null"] },
+                    },
+                  },
+                  // Every field here is nullable in practice: the whole object is null
+                  // when SWPC reports no current flare, and `endedAt` is null for an
+                  // ongoing one (upstream sends the literal string "Unk", normalised away).
+                  solarFlare: {
+                    type: ["object", "null"],
+                    properties: {
+                      currentClass: { type: ["string", "null"] }, peakClass: { type: ["string", "null"] },
+                      significance: { type: ["string", "null"] },
+                      beganAt: { type: ["string", "null"] }, peakAt: { type: ["string", "null"] },
+                      endedAt: { type: ["string", "null"] },
+                      ongoing: { type: "boolean" }, satellite: { type: ["number", "null"] },
+                    },
+                  },
+                  alerts: { type: "array" },
+                  alertWindowHours: { type: "number" }, alertsInWindow: { type: "number" },
+                  alertsExcludedOutsideWindow: { type: "number" }, alertsAvailable: { type: "boolean" },
+                  source: { type: "string" }, attribution: { type: "string" }, disclaimer: { type: "string" },
                 },
               },
             },
@@ -801,6 +877,7 @@ app.get("/", (req, res) => {
       "GET /currency/rate?from=USD&to=JPY",
       "GET /air/quality?lat=...&lng=... (US/CA/MX only)",
       "GET /space/asteroids?date=YYYY-MM-DD",
+      "GET /space/weather?alertWindowHours=24 (NOAA SWPC Kp/G-scale, solar flare, active alerts)",
       "GET /chain/balance?address=0x...&token=0x... (optional)",
       "GET /treasury/debt",
       "GET /ocean/tides?station=... or lat=...&lng=... (&product=predictions|water_level, US coastal stations)",
@@ -816,7 +893,7 @@ app.get("/", (req, res) => {
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   });
 });
 
@@ -851,6 +928,7 @@ const ROUTE_META = {
   "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ["finance", "transparency"] },
   "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ["geo", "government", "demographics"] },
   "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ["finance", "government"] },
+  "/space/weather": { operationId: "spaceWeather", summary: "Current geomagnetic storm level, solar flare activity and NOAA space weather alerts", tags: ["space", "weather", "risk"] },
 };
 
 function routeEntries() {
@@ -879,8 +957,17 @@ function buildOpenApi() {
         summary: meta.summary,
         description: config.description,
         tags: meta.tags,
-        "x-price": PRICE_PER_LOOKUP,
-        "x-payment-info": { protocol: "x402", scheme: "exact", network: NETWORK, price: PRICE_PER_LOOKUP, currency: "USDC" },
+        // Read the route's OWN price, not the default constant. This was hardcoded
+        // to PRICE_PER_LOOKUP and so advertised "$0.001" for every route since
+        // pricing stopped being uniform -- /fire/risk was published at $0.001 in
+        // the OpenAPI doc while actually charging $0.39, a 390x understatement.
+        // Agent402's search ranking reads x-price from this document, and an agent
+        // budgeting from it would be surprised by the real 402 amount.
+        "x-price": config.accepts?.[0]?.price ?? PRICE_PER_LOOKUP,
+        "x-payment-info": {
+          protocol: "x402", scheme: "exact", network: NETWORK,
+          price: config.accepts?.[0]?.price ?? PRICE_PER_LOOKUP, currency: "USDC",
+        },
         parameters,
         responses: {
           200: {
@@ -935,7 +1022,7 @@ function buildX402Manifest() {
       remoteNote: "Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs $0.001 in USDC on Base, paid in-band via x402 (_meta[\"x402/payment\"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.",
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   };
 }
 
@@ -1245,6 +1332,163 @@ async function spaceAsteroidsLogic(args) {
   }
 }
 app.get("/space/asteroids", (req, res) => runHandler(res, () => spaceAsteroidsLogic(req.query)));
+
+// --- /space/weather -------------------------------------------------------
+// Composite over three NOAA SWPC feeds. Public domain, no API key, same footing
+// as the NOAA tide/weather/NWPS feeds already used here.
+//
+// Deliberately NOT fetched: services.swpc.noaa.gov/json/ovation_aurora_latest.json
+// is ~918 KB (a full global grid). That is the same trap as the 12 MB NWPS gauge
+// list -- it would dominate latency and bandwidth for one summary field.
+const SWPC_BASE = "https://services.swpc.noaa.gov";
+const SWPC_UA = "x402-seller-starter/1.0 (contact: you@example.com)";
+const SWPC_ALERT_WINDOW_DEFAULT_H = 24;
+const SWPC_ALERT_WINDOW_MAX_H = 168;
+
+// NOAA's official G-scale. Kp below 5 is not a storm at all, so it maps to G0
+// rather than being reported as a weak storm.
+function kpToStorm(kp) {
+  if (!Number.isFinite(kp)) return { stormLevel: null, stormLabel: null };
+  if (kp >= 9) return { stormLevel: "G5", stormLabel: "Extreme" };
+  if (kp >= 8) return { stormLevel: "G4", stormLabel: "Severe" };
+  if (kp >= 7) return { stormLevel: "G3", stormLabel: "Strong" };
+  if (kp >= 6) return { stormLevel: "G2", stormLabel: "Moderate" };
+  if (kp >= 5) return { stormLevel: "G1", stormLabel: "Minor" };
+  return { stormLevel: "G0", stormLabel: "None" };
+}
+
+// Flare classes are a log scale: A < B < C < M < X. M and X are the ones that
+// actually cause radio blackouts, so only those are called out as significant.
+function flareSignificance(cls) {
+  const letter = typeof cls === "string" ? cls.trim().charAt(0).toUpperCase() : "";
+  if (letter === "X") return "strong";
+  if (letter === "M") return "moderate";
+  if (letter === "C") return "minor";
+  if (letter === "A" || letter === "B") return "minimal";
+  return null;
+}
+
+// SWPC uses THREE different timestamp formats across these three feeds, and one
+// of them is the literal string "Unk" for an unfinished event. Normalising to
+// ISO-8601-with-Z centrally is what stops "Unk" being published as a date.
+function swpcTime(value) {
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw || raw.toLowerCase() === "unk" || raw.toLowerCase() === "none") return null;
+  const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+  const parsed = new Date(iso.endsWith("Z") ? iso : `${iso}Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+// SWPC alert bodies are fixed-format text blocks. Pull the human-meaningful line
+// rather than shipping the whole message: 117 raw alerts is ~81 KB.
+function summariseAlert(message) {
+  const lines = String(message || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const labelled = lines.find((l) => /^(WARNING|ALERT|SUMMARY|WATCH|EXTENDED WARNING|CANCEL WARNING):/i.test(l));
+  if (labelled) return labelled.slice(0, 200);
+  const skip = /^(Space Weather Message Code|Serial Number|Issue Time|#|NOAA Space Weather Scale)/i;
+  return (lines.find((l) => !skip.test(l)) || lines[0] || "").slice(0, 200);
+}
+
+async function swpcGet(path) {
+  // These feeds intermittently reset the connection under back-to-back requests.
+  // One retry converts an observed transient failure into a pass; without it a
+  // paid call 502s on a blip, which is the same failure mode that cost a
+  // /water/streamflow settlement.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const { data } = await axios.get(`${SWPC_BASE}${path}`, {
+        headers: { "User-Agent": SWPC_UA },
+        timeout: 12_000,
+      });
+      return data;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+}
+
+async function spaceWeatherLogic(args = {}) {
+  let windowH = Number(args.alertWindowHours);
+  // Number.isFinite, not `|| default`: alertWindowHours=0 must clamp to the
+  // minimum rather than silently becoming 24 (the /fire/risk radiusKm bug).
+  if (!Number.isFinite(windowH)) windowH = SWPC_ALERT_WINDOW_DEFAULT_H;
+  windowH = Math.min(Math.max(Math.round(windowH), 1), SWPC_ALERT_WINDOW_MAX_H);
+
+  try {
+    // Parallel: sequential would stack three round trips into one paid call.
+    const [kpSeries, flares, alertsRaw] = await Promise.all([
+      swpcGet("/json/planetary_k_index_1m.json"),
+      swpcGet("/json/goes/primary/xray-flares-latest.json"),
+      bestEffort(swpcGet("/products/alerts.json"), 10_000),
+    ]);
+
+    if (!Array.isArray(kpSeries) || kpSeries.length === 0) {
+      throw new HttpError(502, "Upstream NOAA SWPC returned no Kp data");
+    }
+    const latestKp = kpSeries[kpSeries.length - 1] || {};
+    const kpIndex = Number(latestKp.kp_index);
+    const estimatedKp = Number(latestKp.estimated_kp);
+    const storm = kpToStorm(kpIndex);
+
+    // current_class is what the sensor reads right now; max_class is the peak the
+    // event actually reached. Reporting only the current value would understate a
+    // flare that peaked hours ago -- observed live: current C2.1, peak M1.9.
+    const flare = Array.isArray(flares) && flares.length ? flares[0] : null;
+    const peakClass = flare?.max_class ?? null;
+    const endedAt = swpcTime(flare?.end_time);
+
+    let alerts = [];
+    let alertsExcluded = 0;
+    if (Array.isArray(alertsRaw)) {
+      const cutoff = Date.now() - windowH * 3600_000;
+      const mapped = alertsRaw
+        .map((a) => ({ productId: a.product_id || null, issuedAt: swpcTime(a.issue_datetime), summary: summariseAlert(a.message) }))
+        .filter((a) => a.issuedAt);
+      alerts = mapped.filter((a) => Date.parse(a.issuedAt) >= cutoff);
+      alertsExcluded = mapped.length - alerts.length;
+      alerts.sort((a, b) => Date.parse(b.issuedAt) - Date.parse(a.issuedAt));
+    }
+
+    return {
+      geomagnetic: {
+        kpIndex: Number.isFinite(kpIndex) ? kpIndex : null,
+        estimatedKp: Number.isFinite(estimatedKp) ? estimatedKp : null,
+        stormLevel: storm.stormLevel,
+        stormLabel: storm.stormLabel,
+        measuredAt: swpcTime(latestKp.time_tag),
+      },
+      solarFlare: flare
+        ? {
+            currentClass: flare.current_class ?? null,
+            peakClass,
+            significance: flareSignificance(peakClass ?? flare.current_class),
+            beganAt: swpcTime(flare.begin_time),
+            peakAt: swpcTime(flare.max_time),
+            endedAt,
+            ongoing: endedAt === null,
+            satellite: Number.isFinite(Number(flare.satellite)) ? Number(flare.satellite) : null,
+          }
+        : null,
+      alerts,
+      alertWindowHours: windowH,
+      alertsInWindow: alerts.length,
+      // A default filter that hides data must say what it hid, or "no alerts"
+      // is indistinguishable from "alerts exist but are older than the window".
+      alertsExcludedOutsideWindow: alertsExcluded,
+      alertsAvailable: Array.isArray(alertsRaw),
+      source: "NOAA Space Weather Prediction Center (SWPC)",
+      attribution: "Space weather data from NOAA SWPC (public domain).",
+      disclaimer: "Not an official NOAA product. For authoritative watches, warnings and alerts see swpc.noaa.gov.",
+    };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream NOAA SWPC lookup failed");
+  }
+}
+app.get("/space/weather", (req, res) => runHandler(res, () => spaceWeatherLogic(req.query)));
 
 async function baseRpcCall(method, params, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
@@ -2087,6 +2331,7 @@ const MCP_TOOL_DEFS = [
   { path: "/currency/rate", logic: currencyRateLogic },
   { path: "/air/quality", logic: airQualityLogic },
   { path: "/space/asteroids", logic: spaceAsteroidsLogic },
+  { path: "/space/weather", logic: spaceWeatherLogic },
   { path: "/chain/balance", logic: chainBalanceLogic },
   { path: "/treasury/debt", logic: treasuryDebtLogic },
   { path: "/ocean/tides", logic: oceanTidesLogic },
@@ -2262,7 +2507,10 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\n🚀 x402 seller server running at http://localhost:${PORT}`);
-  console.log(`   Paid routes: GET /geo/lookup, GET /geo/reverse, GET /oil/price, GET /gas/price, GET /electricity/price, GET /weather/forecast, GET /nuclear/outages, GET /earthquakes/recent, GET /currency/rate, GET /air/quality, GET /space/asteroids, GET /chain/balance, GET /treasury/debt, GET /ocean/tides, GET /water/streamflow, GET /payments/history, GET /census/demographics, GET /sec/filings-search`);
+  // Derived from PAYMENT_ROUTES, not hand-listed. The previous hardcoded string
+  // had silently gone stale and was omitting /water/flood-risk and /fire/risk,
+  // so the boot log under-reported the paid surface by two routes.
+  console.log(`   Paid routes (${Object.keys(PAYMENT_ROUTES).length}): ${Object.keys(PAYMENT_ROUTES).join(", ")}`);
   console.log(`   Network: ${NETWORK}  |  Facilitator: ${USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL}`);
   console.log(`   Pay-to address: ${PAY_TO}\n`);
 });
