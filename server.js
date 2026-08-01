@@ -145,6 +145,47 @@ const PRICE_FIRE_RISK = "$0.39";
 // Anything above $0.75 would silently stop counting.
 const PRICE_SPACE_WEATHER = "$0.51";
 
+// Bazaar service metadata (`serviceName` / `tags`), applied to every route below.
+// Over half the catalog publishes these and this seller published none, which
+// left it unmatchable to any agent filtering the catalog by structured fields
+// rather than by description text.
+//
+// SINGLE SOURCE OF TRUTH: `ROUTE_META` reads its OpenAPI tags from this same map,
+// so the catalog tags and the OpenAPI tags cannot drift apart. Defined here rather
+// than next to ROUTE_META because the payment middleware compiles route configs
+// eagerly at construction (`compiledRoutes` in @x402/core), so anything attached
+// after `app.use(paymentMiddleware(...))` would silently never reach the catalog.
+//
+// Validation enforced upstream by @x402/core (zod) and @x402/extensions/bazaar:
+// serviceName 1-32 printable-ASCII chars; at most 5 tags, each 1-32 printable-ASCII,
+// de-duplicated case-insensitively. Values violating those are silently dropped, so
+// they will NOT throw -- they just quietly fail to appear in the catalog.
+// Headroom worth knowing: 5 tags are allowed and most routes here use 1-3.
+const SERVICE_NAME = "Data Lookup API";
+const ROUTE_TAGS = {
+  "/geo/lookup": ["geo"],
+  "/geo/reverse": ["geo"],
+  "/oil/price": ["energy", "finance"],
+  "/gas/price": ["energy", "finance"],
+  "/electricity/price": ["energy"],
+  "/weather/forecast": ["weather"],
+  "/nuclear/outages": ["energy"],
+  "/earthquakes/recent": ["geology", "hazards"],
+  "/currency/rate": ["finance"],
+  "/air/quality": ["environment", "weather"],
+  "/space/asteroids": ["space"],
+  "/chain/balance": ["blockchain"],
+  "/treasury/debt": ["finance", "government"],
+  "/ocean/tides": ["ocean", "weather"],
+  "/water/streamflow": ["water", "environment"],
+  "/water/flood-risk": ["water", "environment", "risk"],
+  "/fire/risk": ["fire", "environment", "risk"],
+  "/payments/history": ["finance", "transparency"],
+  "/census/demographics": ["geo", "government", "demographics"],
+  "/sec/filings-search": ["finance", "government"],
+  "/space/weather": ["space", "weather", "risk"],
+};
+
 const PAYMENT_ROUTES = {
       "GET /geo/lookup": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
@@ -832,6 +873,17 @@ const PAYMENT_ROUTES = {
       },
 };
 
+// Attach the Bazaar service metadata to every paid route. Derived rather than
+// hand-written per route so a new endpoint picks it up by adding one ROUTE_TAGS
+// entry -- the same reason PAID_PATHS and the boot-log route list are derived.
+for (const [key, config] of Object.entries(PAYMENT_ROUTES)) {
+  const path = key.split(" ")[1];
+  config.serviceName = SERVICE_NAME;
+  const tags = ROUTE_TAGS[path];
+  if (tags) config.tags = tags;
+  else console.warn(`[bazaar] no ROUTE_TAGS entry for ${path} - it will publish without tags`);
+}
+
 // Block HEAD on paid routes before the paywall runs. PAYMENT_ROUTES keys are
 // method-qualified ("GET /oil/price") and x402 matches them exactly, but
 // Express routes HEAD to app.get() handlers by default — so a HEAD skipped the
@@ -908,27 +960,27 @@ const DEPLOY_VERSION = process.env.RENDER_GIT_COMMIT?.slice(0, 7) || "dev";
 
 // operationId is the search slug in aggregator rankings; summary is the display name.
 const ROUTE_META = {
-  "/geo/lookup": { operationId: "geoLookup", summary: "Forward geocode an address to coordinates and timezone", tags: ["geo"] },
-  "/geo/reverse": { operationId: "geoReverse", summary: "Reverse geocode coordinates to a place name and timezone", tags: ["geo"] },
-  "/oil/price": { operationId: "oilPrice", summary: "Latest WTI or Brent crude oil spot price", tags: ["energy", "finance"] },
-  "/gas/price": { operationId: "gasPrice", summary: "Latest Henry Hub natural gas spot price", tags: ["energy", "finance"] },
-  "/electricity/price": { operationId: "electricityPrice", summary: "Latest US retail electricity price", tags: ["energy"] },
-  "/weather/forecast": { operationId: "weatherForecast", summary: "Official US weather forecast by coordinates", tags: ["weather"] },
-  "/nuclear/outages": { operationId: "nuclearOutages", summary: "Daily US nuclear power plant outage data", tags: ["energy"] },
-  "/earthquakes/recent": { operationId: "earthquakesRecent", summary: "Recent significant earthquakes worldwide", tags: ["geology", "hazards"] },
-  "/currency/rate": { operationId: "currencyRate", summary: "Official daily currency exchange rate", tags: ["finance"] },
-  "/air/quality": { operationId: "airQuality", summary: "Current US air quality index readings", tags: ["environment", "weather"] },
-  "/space/asteroids": { operationId: "spaceAsteroids", summary: "Near-Earth asteroids by closest approach date", tags: ["space"] },
-  "/chain/balance": { operationId: "chainBalance", summary: "Base mainnet wallet ETH and ERC20 balance", tags: ["blockchain"] },
-  "/treasury/debt": { operationId: "treasuryDebt", summary: "US national debt to the penny", tags: ["finance", "government"] },
-  "/ocean/tides": { operationId: "oceanTides", summary: "US tide predictions and observed water levels", tags: ["ocean", "weather"] },
-  "/water/streamflow": { operationId: "waterStreamflow", summary: "Real-time US river streamflow and gauge height", tags: ["water", "environment"] },
-  "/water/flood-risk": { operationId: "waterFloodRisk", summary: "US river level vs official NWS flood stages, with flood category and trend", tags: ["water", "environment", "risk"] },
-  "/fire/risk": { operationId: "fireRisk", summary: "Active US wildfires near a location, with fire weather and smoke", tags: ["fire", "environment", "risk"] },
-  "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ["finance", "transparency"] },
-  "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ["geo", "government", "demographics"] },
-  "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ["finance", "government"] },
-  "/space/weather": { operationId: "spaceWeather", summary: "Current geomagnetic storm level, solar flare activity and NOAA space weather alerts", tags: ["space", "weather", "risk"] },
+  "/geo/lookup": { operationId: "geoLookup", summary: "Forward geocode an address to coordinates and timezone", tags: ROUTE_TAGS["/geo/lookup"] },
+  "/geo/reverse": { operationId: "geoReverse", summary: "Reverse geocode coordinates to a place name and timezone", tags: ROUTE_TAGS["/geo/reverse"] },
+  "/oil/price": { operationId: "oilPrice", summary: "Latest WTI or Brent crude oil spot price", tags: ROUTE_TAGS["/oil/price"] },
+  "/gas/price": { operationId: "gasPrice", summary: "Latest Henry Hub natural gas spot price", tags: ROUTE_TAGS["/gas/price"] },
+  "/electricity/price": { operationId: "electricityPrice", summary: "Latest US retail electricity price", tags: ROUTE_TAGS["/electricity/price"] },
+  "/weather/forecast": { operationId: "weatherForecast", summary: "Official US weather forecast by coordinates", tags: ROUTE_TAGS["/weather/forecast"] },
+  "/nuclear/outages": { operationId: "nuclearOutages", summary: "Daily US nuclear power plant outage data", tags: ROUTE_TAGS["/nuclear/outages"] },
+  "/earthquakes/recent": { operationId: "earthquakesRecent", summary: "Recent significant earthquakes worldwide", tags: ROUTE_TAGS["/earthquakes/recent"] },
+  "/currency/rate": { operationId: "currencyRate", summary: "Official daily currency exchange rate", tags: ROUTE_TAGS["/currency/rate"] },
+  "/air/quality": { operationId: "airQuality", summary: "Current US air quality index readings", tags: ROUTE_TAGS["/air/quality"] },
+  "/space/asteroids": { operationId: "spaceAsteroids", summary: "Near-Earth asteroids by closest approach date", tags: ROUTE_TAGS["/space/asteroids"] },
+  "/chain/balance": { operationId: "chainBalance", summary: "Base mainnet wallet ETH and ERC20 balance", tags: ROUTE_TAGS["/chain/balance"] },
+  "/treasury/debt": { operationId: "treasuryDebt", summary: "US national debt to the penny", tags: ROUTE_TAGS["/treasury/debt"] },
+  "/ocean/tides": { operationId: "oceanTides", summary: "US tide predictions and observed water levels", tags: ROUTE_TAGS["/ocean/tides"] },
+  "/water/streamflow": { operationId: "waterStreamflow", summary: "Real-time US river streamflow and gauge height", tags: ROUTE_TAGS["/water/streamflow"] },
+  "/water/flood-risk": { operationId: "waterFloodRisk", summary: "US river level vs official NWS flood stages, with flood category and trend", tags: ROUTE_TAGS["/water/flood-risk"] },
+  "/fire/risk": { operationId: "fireRisk", summary: "Active US wildfires near a location, with fire weather and smoke", tags: ROUTE_TAGS["/fire/risk"] },
+  "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ROUTE_TAGS["/payments/history"] },
+  "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ROUTE_TAGS["/census/demographics"] },
+  "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ROUTE_TAGS["/sec/filings-search"] },
+  "/space/weather": { operationId: "spaceWeather", summary: "Current geomagnetic storm level, solar flare activity and NOAA space weather alerts", tags: ROUTE_TAGS["/space/weather"] },
 };
 
 function routeEntries() {
@@ -1004,7 +1056,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: "20 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
+    summary: "21 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, space weather, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
