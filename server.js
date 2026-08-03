@@ -144,6 +144,12 @@ const PRICE_FIRE_RISK = "$0.39";
 // calls at maxCallUsd 0.75, so $0.51 still accrues to seller standing there.
 // Anything above $0.75 would silently stop counting.
 const PRICE_SPACE_WEATHER = "$0.51";
+// Composite over three sources (LocationIQ routing + NIFC wildfire incidents +
+// NWS active alerts). PLACEHOLDER PENDING OWNER DECISION -- there is no audited
+// competitor revenue for route-hazard products, the same evidence position
+// /fire/risk and /space/weather are in. Set deliberately mid-catalog (median
+// $0.014, p75 $0.05) rather than assuming the premium tier.
+const PRICE_ROUTE_HAZARDS = "$0.05";
 
 // Bazaar service metadata (`serviceName` / `tags`), applied to every route below.
 // Over half the catalog publishes these and this seller published none, which
@@ -184,6 +190,7 @@ const ROUTE_TAGS = {
   "/census/demographics": ["geo", "government", "demographics"],
   "/sec/filings-search": ["finance", "government"],
   "/space/weather": ["space", "weather", "risk"],
+  "/route/hazards": ["geo", "routing", "fire", "weather", "risk"],
 };
 
 const PAYMENT_ROUTES = {
@@ -498,6 +505,68 @@ const PAYMENT_ROUTES = {
                   address: { type: "string" }, network: { type: "string" },
                   ethBalance: { type: "number" }, token: { type: ["object", "null"] },
                   source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
+      "GET /route/hazards": {
+        accepts: [{ scheme: "exact", price: PRICE_ROUTE_HAZARDS, network: NETWORK, payTo: PAY_TO }],
+        description: "Driving route between two US points, cross-checked against live hazards along the way: distance and duration, plus any active NIFC wildfires within a corridor of the route and any National Weather Service alerts in force along it. Returns the fires and alerts actually near the path, with distances, rather than a route and a separate hazard lookup.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { from: "34.0522,-118.2437", to: "32.7157,-117.1611", corridorKm: "25" },
+            inputSchema: {
+              properties: {
+                from: { type: "string", description: "Origin as \"lat,lng\"" },
+                to: { type: "string", description: "Destination as \"lat,lng\"" },
+                corridorKm: { type: "string", description: "How far either side of the route to look for wildfires, km (1-100, default 25)" },
+              },
+              required: ["from", "to"],
+            },
+            output: {
+              example: {
+                route: {
+                  distanceKm: 195.3, durationMinutes: 146.7,
+                  from: { lat: 34.0522, lng: -118.2437, nearestRoad: "West 1st Street" },
+                  to: { lat: 32.7157, lng: -117.1611, nearestRoad: "Broadway" },
+                  samplePoints: 27,
+                },
+                wildfires: {
+                  corridorKm: 25, countNearRoute: 1,
+                  nearest: { name: "Border 2", distanceKm: 18.4, bearingFromRoute: "SE", acres: 6625, percentContained: 95, state: "US-CA" },
+                  fires: [{ name: "Border 2", distanceKm: 18.4, bearingFromRoute: "SE", acres: 6625, percentContained: 95, state: "US-CA" }],
+                },
+                weatherAlerts: { sampledPoints: 3, count: 1, alerts: [{ event: "Wind Advisory", headline: "Wind Advisory until 8 PM PDT", severity: "Moderate", expires: "2026-08-02T20:00:00-07:00" }] },
+                hazardsFound: true,
+                source: "Routing by LocationIQ (data (c) OpenStreetMap contributors, ODbL 1.0); wildfire incidents from NIFC WFIGS; alerts from NOAA National Weather Service",
+                attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Routing by LocationIQ.com. Wildfire incident data courtesy of the National Interagency Fire Center (WFIGS).",
+                disclaimer: "Not for emergency, evacuation or life-safety decisions. Hazard proximity is measured to sampled points along the route, not a continuous corridor.",
+              },
+              schema: {
+                properties: {
+                  route: {
+                    type: "object",
+                    properties: {
+                      distanceKm: { type: "number" }, durationMinutes: { type: "number" },
+                      from: { type: "object" }, to: { type: "object" }, samplePoints: { type: "number" },
+                    },
+                  },
+                  wildfires: {
+                    type: "object",
+                    properties: {
+                      corridorKm: { type: "number" }, countNearRoute: { type: "number" },
+                      nearest: { type: ["object", "null"] }, fires: { type: "array" },
+                    },
+                  },
+                  weatherAlerts: {
+                    type: "object",
+                    properties: { sampledPoints: { type: "number" }, count: { type: ["number", "null"] }, alerts: { type: "array" } },
+                  },
+                  hazardsFound: { type: "boolean" },
+                  source: { type: "string" }, attribution: { type: "string" }, disclaimer: { type: "string" },
                 },
               },
             },
@@ -930,6 +999,7 @@ app.get("/", (req, res) => {
       "GET /air/quality?lat=...&lng=... (US/CA/MX only)",
       "GET /space/asteroids?date=YYYY-MM-DD",
       "GET /space/weather?alertWindowHours=24 (NOAA SWPC Kp/G-scale, solar flare, active alerts)",
+      "GET /route/hazards?from=lat,lng&to=lat,lng (US driving route + wildfires and NWS alerts along it)",
       "GET /chain/balance?address=0x...&token=0x... (optional)",
       "GET /treasury/debt",
       "GET /ocean/tides?station=... or lat=...&lng=... (&product=predictions|water_level, US coastal stations)",
@@ -945,7 +1015,7 @@ app.get("/", (req, res) => {
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   });
 });
 
@@ -980,6 +1050,7 @@ const ROUTE_META = {
   "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ROUTE_TAGS["/payments/history"] },
   "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ROUTE_TAGS["/census/demographics"] },
   "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ROUTE_TAGS["/sec/filings-search"] },
+  "/route/hazards": { operationId: "routeHazards", summary: "Driving route with active wildfires and weather alerts along it", tags: ROUTE_TAGS["/route/hazards"] },
   "/space/weather": { operationId: "spaceWeather", summary: "Current geomagnetic storm level, solar flare activity and NOAA space weather alerts", tags: ROUTE_TAGS["/space/weather"] },
 };
 
@@ -1074,7 +1145,7 @@ function buildX402Manifest() {
       remoteNote: "Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs $0.001 in USDC on Base, paid in-band via x402 (_meta[\"x402/payment\"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.",
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Geocoding by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   };
 }
 
@@ -2259,6 +2330,184 @@ async function fireRiskLogic({ lat, lng, radiusKm, minAcres }) {
 }
 app.get("/fire/risk", (req, res) => runHandler(res, () => fireRiskLogic(req.query)));
 
+// --- /route/hazards ---------------------------------------------------------
+// Fuses LocationIQ routing with the NIFC and NWS feeds this project already
+// uses. Deliberately NOT a routing proxy: LocationIQ supplies one of three
+// inputs, and the product is the spatial correlation between the route line and
+// live hazards, which no upstream sells. A thin relay of LocationIQ would be
+// sublicensing their Service and is barred by their terms.
+//
+// LICENCE: LocationIQ's routing is OpenStreetMap-derived, so ODbL 1.0
+// attribution ("Data (c) OpenStreetMap contributors") is mandatory on every
+// response, not optional. Serving one route is an ODbL "Produced Work" and does
+// not trigger share-alike; accumulating routes into a stored database would, and
+// is separately barred by LocationIQ's free-tier collection clause. So this
+// route caches NOTHING -- which also keeps it inside the 48-hour free-tier cap.
+//
+// NO SYNTHESISED RISK SCORE, for the same reason /fire/risk has none: NIFC's
+// licence forbids presenting its data as authoritative, and this is life-safety
+// adjacent. The endpoint returns measured facts and leaves judgement to the caller.
+const ROUTE_MAX_SAMPLE_POINTS = 60;
+
+function parseLatLng(value, label) {
+  if (typeof value !== "string" || !value.includes(",")) {
+    throw new HttpError(400, `Invalid '${label}' - expected "lat,lng"`);
+  }
+  const [a, b] = value.split(",", 2);
+  const lat = Number(a), lng = Number(b);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new HttpError(400, `'${label}' lat and lng must be numbers`);
+  if (lat < -90 || lat > 90) throw new HttpError(400, `'${label}' lat must be between -90 and 90`);
+  if (lng < -180 || lng > 180) throw new HttpError(400, `'${label}' lng must be between -180 and 180`);
+  return { lat, lng };
+}
+
+async function routeHazardsLogic({ from, to, corridorKm }) {
+  if (!from || !to) throw new HttpError(400, "Missing required query params: from, to");
+  const origin = parseLatLng(from, "from");
+  const dest = parseLatLng(to, "to");
+  // Number.isFinite, not `||`: corridorKm=0 is falsy and would silently become
+  // the default rather than clamping to the 1 km minimum.
+  const parsedCorridor = Number(corridorKm);
+  const corridor = Number.isFinite(parsedCorridor) ? Math.min(Math.max(parsedCorridor, 1), 100) : 25;
+
+  let route;
+  try {
+    // geometries=geojson avoids decoding an encoded polyline; overview=simplified
+    // keeps the point count small enough to correlate against without pagination.
+    const url = `https://us1.locationiq.com/v1/directions/driving/${origin.lng},${origin.lat};${dest.lng},${dest.lat}`;
+    const { data } = await axios.get(url, {
+      params: { key: LOCATIONIQ_API_KEY, overview: "simplified", steps: "false", geometries: "geojson" },
+      timeout: 15_000,
+    });
+    if (data?.code !== "Ok" || !data?.routes?.length) throw new HttpError(404, "No driving route found between those points");
+    route = { r: data.routes[0], waypoints: data.waypoints || [] };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream routing lookup failed");
+  }
+
+  const coords = (route.r.geometry?.coordinates || []).filter(
+    (c) => Array.isArray(c) && Number.isFinite(c[0]) && Number.isFinite(c[1]));
+  if (!coords.length) throw new HttpError(502, "Upstream routing returned no geometry");
+  // Thin evenly if the geometry is dense, so hazard correlation stays bounded.
+  const step = Math.max(1, Math.ceil(coords.length / ROUTE_MAX_SAMPLE_POINTS));
+  const samples = coords.filter((_, i) => i % step === 0 || i === coords.length - 1)
+    .map(([lng, lat]) => ({ lat, lng }));
+
+  const lats = samples.map((p) => p.lat), lngs = samples.map((p) => p.lng);
+  const pad = corridor / 111; // deg latitude per km, generous for longitude too
+  const envelope = {
+    xmin: Math.min(...lngs) - pad, ymin: Math.min(...lats) - pad,
+    xmax: Math.max(...lngs) + pad, ymax: Math.max(...lats) + pad,
+    spatialReference: { wkid: 4326 },
+  };
+
+  // One envelope query over the whole route beats a per-point query: 60 sampled
+  // points would otherwise mean 60 upstream calls inside one paid request.
+  const since = new Date(Date.now() - WFIGS_RECENT_DAYS * 86_400_000).toISOString().slice(0, 10);
+  const where =
+    `IncidentTypeCategory='WF'` +
+    ` AND IncidentSize > 0` +
+    ` AND (PercentContained < 100 OR PercentContained IS NULL)` +
+    ` AND FireOutDateTime IS NULL` +
+    ` AND ModifiedOnDateTime_dt > DATE '${since}'`;
+
+  const fetchIncidents = async () => axios.get(WFIGS_INCIDENTS, {
+    params: {
+      geometry: JSON.stringify(envelope), geometryType: "esriGeometryEnvelope", inSR: "4326",
+      spatialRel: "esriSpatialRelIntersects", where,
+      outFields: "IncidentName,IncidentSize,PercentContained,POOState",
+      returnGeometry: "true", outSR: "4326", resultRecordCount: "2000", f: "json",
+    },
+    timeout: 20_000,
+  });
+
+  let features = [];
+  try {
+    let resp;
+    try { resp = await fetchIncidents(); }
+    catch { await new Promise((r) => setTimeout(r, 500)); resp = await fetchIncidents(); }
+    // ArcGIS reports errors as HTTP 200 with an error object, so check explicitly.
+    if (resp.data?.error) throw new HttpError(502, "Upstream wildfire lookup failed");
+    features = resp.data?.features || [];
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream wildfire lookup failed");
+  }
+
+  const fires = [];
+  for (const f of features) {
+    const g = f.geometry, a = f.attributes || {};
+    if (!g || !Number.isFinite(g.x) || !Number.isFinite(g.y)) continue;
+    let best = Infinity, bestPt = null;
+    for (const p of samples) {
+      const d = haversineKm(p.lat, p.lng, g.y, g.x);
+      if (d < best) { best = d; bestPt = p; }
+    }
+    if (best > corridor) continue;
+    const acres = Number(a.IncidentSize);
+    const contained = Number(a.PercentContained);
+    fires.push({
+      name: a.IncidentName || null,
+      distanceKm: Math.round(best * 10) / 10,
+      bearingFromRoute: bestPt ? bearingFrom(bestPt.lat, bestPt.lng, g.y, g.x) : null,
+      acres: Number.isFinite(acres) ? acres : null,
+      percentContained: Number.isFinite(contained) ? contained : null,
+      state: a.POOState || null,
+    });
+  }
+  fires.sort((x, y) => x.distanceKm - y.distanceKm);
+
+  // Best-effort and bounded: alerts must not sink or stall a paid answer.
+  // Sampled at three points rather than every one - stated in the response so a
+  // caller knows this is not a continuous corridor scan.
+  const alertPoints = samples.length >= 3
+    ? [samples[0], samples[Math.floor(samples.length / 2)], samples[samples.length - 1]]
+    : samples;
+  const alertResults = await Promise.all(
+    alertPoints.map((p) => bestEffort(fireWeatherFor(p.lat, p.lng), 8000)));
+  const anyAlertOk = alertResults.some((r) => r !== null);
+  const seen = new Set();
+  const alerts = [];
+  for (const r of alertResults) {
+    for (const al of r?.alerts || []) {
+      const key = `${al.event}|${al.expires}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      alerts.push(al);
+    }
+  }
+
+  return {
+    route: {
+      distanceKm: Math.round((route.r.distance / 1000) * 10) / 10,
+      durationMinutes: Math.round((route.r.duration / 60) * 10) / 10,
+      from: { lat: origin.lat, lng: origin.lng, nearestRoad: route.waypoints[0]?.name || null },
+      to: { lat: dest.lat, lng: dest.lng, nearestRoad: route.waypoints[1]?.name || null },
+      samplePoints: samples.length,
+    },
+    wildfires: {
+      corridorKm: corridor,
+      countNearRoute: fires.length,
+      nearest: fires[0] || null,
+      fires: fires.slice(0, 20),
+    },
+    weatherAlerts: {
+      sampledPoints: alertPoints.length,
+      // null, not 0: an upstream failure must not read as "no alerts".
+      count: anyAlertOk ? alerts.length : null,
+      alerts,
+    },
+    hazardsFound: fires.length > 0 || alerts.length > 0,
+    source: "Routing by LocationIQ (data (c) OpenStreetMap contributors, ODbL 1.0); wildfire incidents from NIFC WFIGS; alerts from NOAA National Weather Service",
+    attribution: `Data (c) OpenStreetMap contributors, ODbL 1.0. Routing by LocationIQ.com. ${WFIGS_ATTRIBUTION}`,
+    disclaimer: `${WFIGS_DISCLAIMER} Hazard proximity is measured to sampled points along the route, not a continuous corridor.`,
+  };
+}
+app.get("/route/hazards", (req, res) => runHandler(res, () => routeHazardsLogic(req.query)));
+
 // Vintage year = the API path segment and the end-year of the 5-year window.
 // Census releases a new 5-year ACS vintage annually (usually late January);
 // bump this one constant each year.
@@ -2384,6 +2633,7 @@ const MCP_TOOL_DEFS = [
   { path: "/air/quality", logic: airQualityLogic },
   { path: "/space/asteroids", logic: spaceAsteroidsLogic },
   { path: "/space/weather", logic: spaceWeatherLogic },
+  { path: "/route/hazards", logic: routeHazardsLogic },
   { path: "/chain/balance", logic: chainBalanceLogic },
   { path: "/treasury/debt", logic: treasuryDebtLogic },
   { path: "/ocean/tides", logic: oceanTidesLogic },
