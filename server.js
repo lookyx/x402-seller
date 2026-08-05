@@ -255,10 +255,10 @@ const PAYMENT_ROUTES = {
               required: [],
             },
             output: {
-              example: { benchmark: "WTI", price: 73.2, unit: "Dollars per Barrel", date: "2026-07-15", source: "U.S. Energy Information Administration (EIA)" },
+              example: { commodity: "crude oil", benchmark: "WTI", price: 73.2, unit: "Dollars per Barrel", date: "2026-07-15", source: "U.S. Energy Information Administration (EIA)" },
               schema: {
                 properties: {
-                  benchmark: { type: "string" }, price: { type: "number" },
+                  commodity: { type: "string" }, benchmark: { type: "string" }, price: { type: "number" },
                   unit: { type: "string" }, date: { type: "string" }, source: { type: "string" },
                 },
               },
@@ -275,10 +275,10 @@ const PAYMENT_ROUTES = {
             input: {},
             inputSchema: { properties: {}, required: [] },
             output: {
-              example: { benchmark: "Henry Hub", price: 3.12, unit: "Dollars per Million Btu", date: "2026-07-15", source: "U.S. Energy Information Administration (EIA)" },
+              example: { commodity: "natural gas", benchmark: "Henry Hub", price: 3.12, unit: "Dollars per Million Btu", date: "2026-07-15", source: "U.S. Energy Information Administration (EIA)" },
               schema: {
                 properties: {
-                  benchmark: { type: "string" }, price: { type: "number" },
+                  commodity: { type: "string" }, benchmark: { type: "string" }, price: { type: "number" },
                   unit: { type: "string" }, date: { type: "string" }, source: { type: "string" },
                 },
               },
@@ -989,8 +989,8 @@ app.get("/", (req, res) => {
     paid_endpoints: [
       "GET /geo/lookup?address=...",
       "GET /geo/reverse?lat=...&lng=...",
-      "GET /oil/price?benchmark=wti|brent",
-      "GET /gas/price",
+      "GET /oil/price?benchmark=wti|brent (crude oil spot price)",
+      "GET /gas/price (Henry Hub natural gas spot price)",
       "GET /electricity/price?state=US",
       "GET /weather/forecast?lat=...&lng=... (US only)",
       "GET /nuclear/outages",
@@ -1254,7 +1254,11 @@ async function oilPriceLogic({ benchmark }) {
     const points = data?.response?.data || [];
     if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
-    return { benchmark: chosen.label, price: eiaNum(latest.value), unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
+    // Same reasoning as /gas/price: "WTI"/"Brent" identify the benchmark but
+    // never say crude oil. Fixed together rather than one at a time -- gotcha #24
+    // exists because a previous fix covered 2 of 4 EIA routes and the other 2
+    // stayed broken for weeks.
+    return { commodity: "crude oil", benchmark: chosen.label, price: eiaNum(latest.value), unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
@@ -1274,7 +1278,12 @@ async function gasPriceLogic() {
     const points = data?.response?.data || [];
     if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
-    return { benchmark: "Henry Hub", price: eiaNum(latest.value), unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
+    // "commodity" is explicit because the route name is not: in US usage "gas"
+    // means gasoline, so an agent could reasonably read /gas/price as pump prices
+    // and receive a wholesale natural gas figure with no way to detect the
+    // mismatch. "Henry Hub" and "Dollars per Million Btu" only imply natural gas
+    // to a reader who already knows the domain.
+    return { commodity: "natural gas", benchmark: "Henry Hub", price: eiaNum(latest.value), unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
