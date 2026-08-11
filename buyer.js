@@ -20,9 +20,18 @@ const httpClient = new x402HTTPClient(client);
 
 const url = "https://x402-seller.onrender.com/oil/price?benchmark=brent";
 
+// Self-identify so this project's own traffic is filterable in the [REQ] logs —
+// see the longer note in buyer-all.js. Kept identical across all three buyer
+// scripts on purpose, so one grep covers every self-test transport.
+const SELFTEST_UA =
+  "x402-seller-selftest/1.0 (+https://x402-seller.onrender.com; own regression suite, not a buyer)";
+
 console.log("Requesting:", url);
 
-const response = await fetchWithPayment(url, { method: "GET" });
+const response = await fetchWithPayment(url, {
+  method: "GET",
+  headers: { "user-agent": SELFTEST_UA },
+});
 
 // Clone before anything reads the body, so the hash is computed over the exact
 // bytes that arrived on the wire.

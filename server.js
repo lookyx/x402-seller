@@ -12,6 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createPaymentWrapper } from "@x402/mcp";
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
 const PORT = process.env.PORT || 4021;
@@ -68,6 +69,15 @@ app.use((req, res, next) => {
 const REQUEST_ID_MAX = 128;
 const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]+$/;
 
+// Carries the current request's identity into the x402 payment lifecycle hooks
+// registered below. The hooks are invoked from inside paymentMiddleware, i.e.
+// still within this request's async context, so an AsyncLocalStorage store set
+// here is visible there. This is the only way to tie a [PAY] line back to its
+// [REQ] line: the hook contexts carry the payment, not the HTTP request, and
+// `transportContext` is the library's own adapter object rather than Express's
+// req/res. Node built-in, so no new dependency.
+const requestContext = new AsyncLocalStorage();
+
 app.use((req, res, next) => {
   // An inbound header is untrusted input. Node throws on CR/LF in a header
   // value, which would turn a hostile request id into a 500, so validate
@@ -93,7 +103,13 @@ app.use((req, res, next) => {
     }
     return result;
   };
-  next();
+
+  // Everything downstream — including paymentMiddleware and therefore the
+  // payment hooks — runs inside this store.
+  requestContext.run(
+    { requestId, path: req.path, ua: req.get("user-agent") || "" },
+    next,
+  );
 });
 
 const baseFacilitatorClient = USING_CDP
@@ -105,6 +121,85 @@ const facilitatorClient = withBazaar(baseFacilitatorClient);
 const resourceServer = new x402ResourceServer(facilitatorClient)
   .register(NETWORK, new ExactEvmScheme())
   .registerExtension(bazaarResourceServerExtension);
+
+// ---------------------------------------------------------------------------
+// Payment funnel logging: the three stages that actually distinguish a buyer
+// from a crawler, emitted as `[PAY]` lines alongside the existing `[REQ]` ones.
+//
+//   verified  -> someone accepted the price and produced a valid authorization
+//   canceled  -> they accepted it, but our own handler then returned >= 400
+//   settled   -> a completed sale
+//
+// Why this matters: ~4.3k 402s/day are almost entirely non-paying crawlers and
+// tell us nothing, while the handful of requests that reach `verified` are the
+// only real intent signal the service produces — and until now it was generated
+// and immediately discarded. A 400 from a verified payer and a 400 from a
+// crawler previously produced identical log lines.
+//
+// Two deliberate constraints:
+//   - NEVER log the raw X-PAYMENT header. It carries a signed authorization
+//     (payer, nonce, amount, signature) and these lines sit in Render's logs
+//     for days. Payer address, amount and tx hash only.
+//   - A verified payment proves payment CAPABILITY, not organic demand. Our own
+//     regression runs are the largest single source of `canceled` events, and
+//     third-party settlement verifiers pay with no intent to consume. Filter by
+//     payer address (and now by the self-test User-Agent) before reading any of
+//     this as a customer.
+//
+// `transaction` is guaranteed non-optional on SettleResponse, so `settled` lines
+// are self-attributing — this replaces correlating a [REQ] timestamp against an
+// on-chain settlement a second later, which only ever worked because sales were
+// rare enough to sit alone in a quiet window.
+// ---------------------------------------------------------------------------
+const payLog = (stage, fields) => {
+  // Hook failures are caught and logged by the library rather than breaking the
+  // request, but a logging bug must never be able to affect a payment at all.
+  try {
+    const ctx = requestContext.getStore();
+    const parts = [
+      `[PAY] ${stage}`,
+      `route=${ctx?.path ?? "-"}`,
+      ...Object.entries(fields)
+        .filter(([, v]) => v !== undefined && v !== null && v !== "")
+        .map(([k, v]) => `${k}=${v}`),
+      `ua="${ctx?.ua ?? ""}"`,
+      `rid=${ctx?.requestId ?? "-"}`,
+    ];
+    console.log(parts.join(" "));
+  } catch {
+    /* never let instrumentation break a payment */
+  }
+};
+
+resourceServer
+  .onAfterVerify(async ({ result, requirements }) => {
+    payLog("verified", {
+      payer: result?.payer,
+      amount: requirements?.amount,
+      valid: result?.isValid,
+      reason: result?.invalidReason,
+    });
+  })
+  .onVerifiedPaymentCanceled(async ({ reason, responseStatus, paymentPayload, requirements }) => {
+    // Reached only after a successful verify, so this is a payment-capable
+    // client that our own API shape then turned away. `handler_failed` is the
+    // path that fires here (runHandler sends a 4xx rather than throwing).
+    payLog("canceled", {
+      reason,
+      status: responseStatus,
+      amount: requirements?.amount,
+      payer: paymentPayload?.payload?.authorization?.from,
+    });
+  })
+  .onAfterSettle(async ({ result, requirements }) => {
+    payLog("settled", {
+      payer: result?.payer,
+      amount: result?.amount ?? requirements?.amount,
+      tx: result?.transaction,
+      success: result?.success,
+      error: result?.errorReason,
+    });
+  });
 
 const PRICE_PER_LOOKUP = "$0.001";
 const PRICE_SEC_FILINGS_SEARCH = "$0.05";

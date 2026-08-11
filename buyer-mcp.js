@@ -26,7 +26,16 @@ const x402Mcp = new x402MCPClient(mcpClient, paymentClient, {
   },
 });
 
-const transport = new StreamableHTTPClientTransport(new URL("https://x402-seller.onrender.com/mcp"));
+// Self-identify so this project's own traffic is filterable in the [REQ] logs —
+// see the longer note in buyer-all.js. Same string across all three buyer
+// scripts on purpose, so one grep covers every self-test transport.
+const SELFTEST_UA =
+  "x402-seller-selftest/1.0 (+https://x402-seller.onrender.com; own regression suite, not a buyer)";
+
+const transport = new StreamableHTTPClientTransport(
+  new URL("https://x402-seller.onrender.com/mcp"),
+  { requestInit: { headers: { "user-agent": SELFTEST_UA } } },
+);
 await x402Mcp.connect(transport);
 
 const toolName = "treasury_debt";

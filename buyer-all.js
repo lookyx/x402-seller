@@ -29,6 +29,17 @@ client.register("eip155:*", new ExactEvmScheme(signer));
 const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 const httpClient = new x402HTTPClient(client);
 
+// Self-identify so this project's own traffic is filterable in the [REQ] logs.
+// Without it these runs arrive as ua="node" — indistinguishable from the
+// third-party prober that has hit the paid routes for weeks AND from real
+// organic buyers (three of them have now arrived as ua="node", including the
+// largest one to date). Regression runs are also the single biggest source of
+// verified-payment-then-handler-failed events, i.e. exactly the signal that
+// would otherwise read as demand. Grep `ua="x402-seller-selftest` to isolate
+// or exclude our own calls.
+export const SELFTEST_UA =
+  "x402-seller-selftest/1.0 (+https://x402-seller.onrender.com; own regression suite, not a buyer)";
+
 const BASE = "https://x402-seller.onrender.com";
 const ROUTES = [
   "/geo/lookup?address=Tokyo",
@@ -76,7 +87,10 @@ for (const path of ROUTES) {
   const url = BASE + path;
   process.stdout.write(`\n${path} ... `);
   try {
-    const response = await fetchWithPayment(url, { method: "GET" });
+    const response = await fetchWithPayment(url, {
+      method: "GET",
+      headers: { "user-agent": SELFTEST_UA },
+    });
 
     // Clone before anything consumes the body, so the hash covers exactly what arrived.
     const bytes = Buffer.from(await response.clone().arrayBuffer());
