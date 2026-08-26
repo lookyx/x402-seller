@@ -201,6 +201,15 @@ resourceServer
     });
   });
 
+// Every upstream call must be time-bounded. Catching an error does not bound
+// latency, and unbounded calls have twice reached a real paying client: 15.4s
+// then 36.3s on /gas/price, and 23.9s on an invalid /electricity/price before
+// it 404'd. Gotcha #31 established this for /fire/risk's best-effort enrichment
+// calls only; it applies just as much to each route's PRIMARY upstream call.
+// 12s matches the existing SWPC/NWS-alerts choice and sits ~3x under the worst
+// observed hang while leaving healthy calls (~0.5-2s) far below the ceiling.
+const UPSTREAM_TIMEOUT_MS = 12_000;
+
 const PRICE_PER_LOOKUP = "$0.001";
 const PRICE_SEC_FILINGS_SEARCH = "$0.05";
 const PRICE_OIL = "$0.005";
@@ -1287,10 +1296,20 @@ async function runHandler(res, fn) {
   }
 }
 
+// LocationIQ signals "no match" with HTTP 404 + {error:"Unable to geocode"}.
+// axios throws on that status, so the `data.length === 0` branch below never
+// sees it and a legitimate "no such address" fell through to the generic catch
+// and was returned as 502 "Upstream geocoding lookup failed". That is not a
+// cosmetic mislabel: a 502 tells buyers, routers and trust-indexes that OUR
+// infrastructure broke, when in fact we answered the question correctly. Seen
+// in production 2026-08-26 on /geo/lookup?address=0xd8dA...(an ETH address).
+const isGeocodeNoMatch = (err) => err?.response?.status === 404;
+
 async function geoLookupLogic({ address }) {
   if (!address) throw new HttpError(400, "Missing required query param: address");
   try {
     const { data } = await axios.get("https://us1.locationiq.com/v1/search", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: { key: LOCATIONIQ_API_KEY, q: address, format: "json", limit: 1 },
     });
     if (!data || data.length === 0) throw new HttpError(404, "No match found for that address");
@@ -1299,6 +1318,7 @@ async function geoLookupLogic({ address }) {
     return { query: address, lat: parseFloat(lat), lng: parseFloat(lon), timezone: tzMatches[0] || null, display_name };
   } catch (err) {
     if (err instanceof HttpError) throw err;
+    if (isGeocodeNoMatch(err)) throw new HttpError(404, "No match found for that address");
     console.error(err.response?.data || err.message);
     throw new HttpError(502, "Upstream geocoding lookup failed");
   }
@@ -1309,12 +1329,14 @@ async function geoReverseLogic({ lat, lng }) {
   if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
   try {
     const { data } = await axios.get("https://us1.locationiq.com/v1/reverse", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: { key: LOCATIONIQ_API_KEY, lat, lon: lng, format: "json" },
     });
     const tzMatches = findTimezone(parseFloat(lat), parseFloat(lng));
     return { lat: parseFloat(lat), lng: parseFloat(lng), timezone: tzMatches[0] || null, display_name: data?.display_name || null };
   } catch (err) {
     if (err instanceof HttpError) throw err;
+    if (isGeocodeNoMatch(err)) throw new HttpError(404, "No location found for those coordinates");
     console.error(err.response?.data || err.message);
     throw new HttpError(502, "Upstream reverse geocoding lookup failed");
   }
@@ -1341,6 +1363,7 @@ async function oilPriceLogic({ benchmark }) {
   if (!chosen) throw new HttpError(400, "benchmark must be 'wti' or 'brent'");
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/petroleum/pri/spt/data", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: {
         api_key: EIA_API_KEY, frequency: "daily", "data[0]": "value",
         "facets[series][]": chosen.code, "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
@@ -1365,6 +1388,7 @@ app.get("/oil/price", (req, res) => runHandler(res, () => oilPriceLogic(req.quer
 async function gasPriceLogic() {
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/natural-gas/pri/fut/data", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: {
         api_key: EIA_API_KEY, frequency: "daily", "data[0]": "value",
         "facets[series][]": "RNGWHHD", "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
@@ -1389,8 +1413,19 @@ app.get("/gas/price", (req, res) => runHandler(res, () => gasPriceLogic(req.quer
 
 async function electricityPriceLogic(args) {
   const state = (args.state || "US").toUpperCase();
+  // Validate the shape before spending an upstream call. EIA stateids are
+  // 2-letter US state codes, "US", or 2-3 letter census-region codes (ENC,
+  // PAC, ...), so anything else cannot match and there is no reason to spend
+  // a round trip discovering that. A real paying client sent ?state=bitcoin on
+  // 2026-08-26 and waited 23.9s to be told 404. A 4xx does not settle either
+  // way (gotcha #27), so this costs the caller nothing -- it just fails in
+  // ~1ms instead of ~24s.
+  if (!/^[A-Z]{2,3}$/.test(state)) {
+    throw new HttpError(400, "Invalid 'state' query param (expected a 2-letter US state code such as CA, or US for the national average)");
+  }
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/electricity/retail-sales/data", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: {
         api_key: EIA_API_KEY, frequency: "monthly", "data[0]": "price",
         "facets[stateid][]": state, "facets[sectorid][]": "ALL",
@@ -1413,12 +1448,13 @@ async function weatherForecastLogic({ lat, lng }) {
   if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
   try {
     const pointsResp = await axios.get(`https://api.weather.gov/points/${lat},${lng}`, {
+      timeout: UPSTREAM_TIMEOUT_MS,
       headers: { "User-Agent": NWS_USER_AGENT },
     });
     const forecastUrl = pointsResp.data?.properties?.forecast;
     const gridId = pointsResp.data?.properties?.gridId;
     if (!forecastUrl) throw new HttpError(502, "Could not resolve forecast URL for this location");
-    const forecastResp = await axios.get(forecastUrl, { headers: { "User-Agent": NWS_USER_AGENT } });
+    const forecastResp = await axios.get(forecastUrl, { headers: { "User-Agent": NWS_USER_AGENT }, timeout: UPSTREAM_TIMEOUT_MS });
     const period = forecastResp.data?.properties?.periods?.[0];
     if (!period) throw new HttpError(502, "No forecast data available for this location");
     return {
@@ -1439,6 +1475,7 @@ app.get("/weather/forecast", (req, res) => runHandler(res, () => weatherForecast
 async function nuclearOutagesLogic() {
   try {
     const { data } = await axios.get("https://api.eia.gov/v2/nuclear-outages/us-nuclear-outages/data", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: {
         api_key: EIA_API_KEY, frequency: "daily",
         "data[0]": "capacity", "data[1]": "outage", "data[2]": "percentOutage",
@@ -1467,6 +1504,7 @@ async function earthquakesRecentLogic(args) {
   const starttime = new Date(endtime.getTime() - 7 * 24 * 60 * 60 * 1000);
   try {
     const { data } = await axios.get("https://earthquake.usgs.gov/fdsnws/event/1/query", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: { format: "geojson", starttime: starttime.toISOString(), endtime: endtime.toISOString(), minmagnitude, orderby: "time", limit },
     });
     const features = data?.features || [];
@@ -1489,7 +1527,7 @@ async function currencyRateLogic(args) {
   const from = (args.from || "EUR").toUpperCase();
   const to = (args.to || "USD").toUpperCase();
   try {
-    const { data: xml } = await axios.get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml");
+    const { data: xml } = await axios.get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml", { timeout: UPSTREAM_TIMEOUT_MS });
     const parsed = xmlParser.parse(xml);
     const dayCube = parsed["gesmes:Envelope"]?.Cube?.Cube;
     const date = dayCube?.time;
@@ -1513,6 +1551,7 @@ async function airQualityLogic({ lat, lng }) {
   if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
   try {
     const { data } = await axios.get("https://www.airnowapi.org/aq/observation/latLong/current/", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: { format: "application/json", latitude: lat, longitude: lng, distance: 25, API_KEY: AIRNOW_API_KEY },
     });
     if (!Array.isArray(data) || data.length === 0) throw new HttpError(404, "No air quality data available near this location");
@@ -1536,6 +1575,7 @@ async function spaceAsteroidsLogic(args) {
   const date = args.date || new Date().toISOString().slice(0, 10);
   try {
     const { data } = await axios.get("https://api.nasa.gov/neo/rest/v1/feed", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: { start_date: date, end_date: date, api_key: NASA_API_KEY },
     });
     const dayList = data?.near_earth_objects?.[date] || [];
@@ -1846,7 +1886,7 @@ async function treasuryDebtLogic() {
   try {
     const { data } = await axios.get(
       "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/debt_to_penny",
-      { params: { sort: "-record_date", "page[size]": 1 } }
+      { params: { sort: "-record_date", "page[size]": 1 }, timeout: UPSTREAM_TIMEOUT_MS }
     );
     const latest = data?.data?.[0];
     if (!latest) throw new HttpError(502, "No data returned from Treasury Fiscal Data");
@@ -1885,6 +1925,7 @@ async function nearestNoaaStation(product, lat, lng) {
     stations = cached.stations;
   } else {
     const { data } = await axios.get("https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: { type: NOAA_STATION_TYPE_FOR_PRODUCT[product] },
     });
     stations = (data?.stations || [])
@@ -1934,11 +1975,11 @@ async function oceanTidesLogic(args) {
     // predictions responses carry no station metadata (water_level does), so fetch it
     // separately — unless nearest-station resolution already gave us the metadata
     const [{ data }, stationMeta] = await Promise.all([
-      axios.get("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter", { params }),
+      axios.get("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter", { params, timeout: UPSTREAM_TIMEOUT_MS }),
       resolved
         ? Promise.resolve(resolved)
         : axios
-            .get(`https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/${encodeURIComponent(station)}.json`)
+            .get(`https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/${encodeURIComponent(station)}.json`, { timeout: UPSTREAM_TIMEOUT_MS })
             .then((r) => r.data?.stations?.[0] || null)
             .catch(() => null),
     ]);
@@ -1976,6 +2017,7 @@ async function waterStreamflowLogic({ site }) {
   if (!site) throw new HttpError(400, "Missing required query param: site (USGS site number, e.g. 09380000)");
   try {
     const { data } = await axios.get("https://waterservices.usgs.gov/nwis/iv/", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: { format: "json", sites: site, parameterCd: "00060,00065", siteStatus: "all" },
     });
     const seriesList = data?.value?.timeSeries || [];
@@ -2624,6 +2666,7 @@ async function censusDemographicsLogic({ zip }) {
   const zip5 = zip.slice(0, 5);
   try {
     const { data, status } = await axios.get(`https://api.census.gov/data/${CENSUS_ACS_VINTAGE_YEAR}/acs/acs5`, {
+      timeout: UPSTREAM_TIMEOUT_MS,
       params: {
         get: "NAME,B01003_001E,B19013_001E,B01002_001E,B25001_001E",
         for: `zip code tabulation area:${zip5}`,
@@ -2678,6 +2721,7 @@ async function secFilingsSearchLogic(args) {
   const limit = Math.min(parseInt(args.limit, 10) || 10, 50);
   try {
     const { data } = await axios.get("https://efts.sec.gov/LATEST/search-index", {
+      timeout: UPSTREAM_TIMEOUT_MS,
       headers: { "User-Agent": SEC_USER_AGENT },
       params: { q, ...(forms ? { forms } : {}), ...(startdt ? { startdt } : {}), ...(enddt ? { enddt } : {}) },
     });
