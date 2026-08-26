@@ -1499,6 +1499,14 @@ app.get("/nuclear/outages", (req, res) => runHandler(res, () => nuclearOutagesLo
 
 async function earthquakesRecentLogic(args) {
   const minmagnitude = args.minmagnitude || "4.5";
+  // USGS returns HTTP 400 for a non-numeric minmagnitude, which axios throws and
+  // the catch below would report as "Upstream USGS lookup failed" -- a 502 that
+  // blames our infrastructure for the caller's bad parameter. Same mislabel class
+  // as the /geo/lookup 502 fixed in d897ce1. Validate first so it is a fast,
+  // honest 400 that also skips a pointless upstream round trip.
+  if (!Number.isFinite(Number(minmagnitude))) {
+    throw new HttpError(400, "Invalid 'minmagnitude' query param (expected a number, e.g. 4.5)");
+  }
   const limit = Math.min(parseInt(args.limit, 10) || 10, 50);
   const endtime = new Date();
   const starttime = new Date(endtime.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -1573,6 +1581,13 @@ app.get("/air/quality", (req, res) => runHandler(res, () => airQualityLogic(req.
 
 async function spaceAsteroidsLogic(args) {
   const date = args.date || new Date().toISOString().slice(0, 10);
+  // NASA returns HTTP 400 for a malformed date and the catch below would report
+  // it as "Upstream NASA lookup failed" -- blaming us for the caller's bad param.
+  // Date.parse also rejects shape-valid impossibilities like 2026-13-45, which a
+  // regex alone would let through to become the same misleading 502.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date + "T00:00:00Z"))) {
+    throw new HttpError(400, "Invalid 'date' query param (expected YYYY-MM-DD, e.g. 2026-08-25)");
+  }
   try {
     const { data } = await axios.get("https://api.nasa.gov/neo/rest/v1/feed", {
       timeout: UPSTREAM_TIMEOUT_MS,
@@ -2733,6 +2748,41 @@ async function secFilingsSearchLogic(args) {
     }
     const total = data.hits?.total?.value ?? 0;
     const totalIsApprox = data.hits?.total?.relation === "gte";
+    // EDGAR does NOT reject an unknown `forms` value -- it answers HTTP 200 with
+    // total: 0 and no error field. So a nonsense form type was indistinguishable
+    // from a genuine no-match and got BILLED as a successful empty answer: a real
+    // buyer paid $0.05 for {totalMatches: 0, filings: []} on 2026-08-26 with
+    // ?forms=bitcoin&q=bitcoin.
+    //
+    // No shape check can separate the two -- CORRESP, ARS and UPLOAD are real
+    // form types and are letters-only, exactly like the garbage value (measured:
+    // CORRESP=839 hits, ARS=167, UPLOAD=1056, bitcoin=0, ZZZZZ=0). An allowlist
+    // would need ~500 entries and would break whenever the SEC adds one.
+    //
+    // The only reliable discriminator is comparative: re-run without the filter.
+    // That extra call fires ONLY on the already-empty path, so the cost lands
+    // exactly where the answer was worthless anyway.
+    if (forms && total === 0) {
+      let unfilteredTotal = 0;
+      try {
+        const { data: probe } = await axios.get("https://efts.sec.gov/LATEST/search-index", {
+          timeout: UPSTREAM_TIMEOUT_MS,
+          headers: { "User-Agent": SEC_USER_AGENT },
+          params: { q, ...(startdt ? { startdt } : {}), ...(enddt ? { enddt } : {}) },
+        });
+        unfilteredTotal = probe.hits?.total?.value ?? 0;
+      } catch {
+        // A failed probe must not turn an upstream blip into a spurious 400.
+        // Fall through and return the empty result as before.
+        unfilteredTotal = 0;
+      }
+      if (unfilteredTotal > 0) {
+        throw new HttpError(400, "No filings matched forms='" + String(forms).slice(0, 40) +
+          "'. The same query matches " + unfilteredTotal + " filings without that filter, so it is not a recognised EDGAR form type (examples: 10-K, 10-Q, 8-K, S-1, DEF 14A, CORRESP).");
+      }
+      // unfilteredTotal === 0 means the query genuinely matches nothing. That is
+      // a real answer and totalMatches: 0 states it plainly, so it stays a 200.
+    }
     // The upstream `size` param is silently ignored -- every page is capped
     // at 100 hits regardless, so slice to our own limit client-side.
     const filings = (data.hits?.hits || []).slice(0, limit).map((hit) => {
