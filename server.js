@@ -212,7 +212,12 @@ const UPSTREAM_TIMEOUT_MS = 12_000;
 
 const PRICE_PER_LOOKUP = "$0.001";
 const PRICE_SEC_FILINGS_SEARCH = "$0.05";
-const PRICE_OIL = "$0.005";
+// Raised from $0.005 to $0.05 by owner decision on 2026-10-06. It had become the
+// most-bought identifiable route (9 organic sales from 6 wallets in the prior 31
+// days). Note it now shares $0.05 with /sec/filings-search and /route/hazards,
+// so the on-chain amount no longer identifies an oil sale -- use the [PAY] log
+// lines, which carry the route, to attribute it.
+const PRICE_OIL = "$0.05";
 const PRICE_CURRENCY_RATE = "$0.008";
 const PRICE_CHAIN_BALANCE = "$0.012";
 // Raised from the $0.001 default after this route took the project's first

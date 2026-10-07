@@ -11,7 +11,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 |---|---|---|
 | `GET /geo/lookup?address=...` | Address → lat/lng + IANA timezone (LocationIQ) | $0.001 |
 | `GET /geo/reverse?lat=...&lng=...` | Coordinates → place name + timezone (LocationIQ) | $0.001 |
-| `GET /oil/price?benchmark=wti\|brent` | Latest daily WTI/Brent spot price (EIA) | $0.005 |
+| `GET /oil/price?benchmark=wti\|brent` | Latest daily WTI/Brent spot price (EIA) | $0.05 |
 | `GET /gas/price` | Latest Henry Hub natural gas spot price (EIA) | $0.001 |
 | `GET /electricity/price?state=US` | Latest US retail electricity price, national or by state (EIA) | $0.001 |
 | `GET /weather/forecast?lat=...&lng=...` | Official US weather forecast by coordinates (NWS/NOAA, US only) | $0.001 |
