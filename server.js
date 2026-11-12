@@ -214,9 +214,10 @@ const PRICE_PER_LOOKUP = "$0.001";
 const PRICE_SEC_FILINGS_SEARCH = "$0.05";
 // Raised from $0.005 to $0.05 by owner decision on 2026-10-06. It had become the
 // most-bought identifiable route (9 organic sales from 6 wallets in the prior 31
-// days). Note it now shares $0.05 with /sec/filings-search and /route/hazards,
-// so the on-chain amount no longer identifies an oil sale -- use the [PAY] log
-// lines, which carry the route, to attribute it.
+// days). Note it now shares $0.05 with /sec/filings-search, /route/hazards and
+// (since 2026-11-11) /water/flood-risk, /fire/risk and /space/weather, so the
+// on-chain amount no longer identifies an oil sale -- use the [PAY] log lines,
+// which carry the route, to attribute it.
 const PRICE_OIL = "$0.05";
 const PRICE_CURRENCY_RATE = "$0.008";
 const PRICE_CHAIN_BALANCE = "$0.012";
@@ -225,34 +226,31 @@ const PRICE_CHAIN_BALANCE = "$0.012";
 // rather than premium. Note the sole known buyer paid $0.001, so this is a
 // deliberate bet that demand survives a 10x - watch whether they return.
 const PRICE_WEATHER_FORECAST = "$0.01";
-// Interpreted-signal route rather than a raw lookup, so it is priced off the
-// audited competitor selling the same USGS/NOAA feeds as a flood-risk answer,
-// matching the ~$0.31/call they actually settle on-chain rather than this
-// project's raw-data default. That is above the catalog's p90 ($0.15), which is
-// deliberate: the comparable is what a buyer already pays for this answer, not
-// what the median listing (which mostly earns nothing) asks for.
-const PRICE_FLOOD_RISK = "$0.31";
-// Composite signal across three sources (NIFC incidents + NWS fire weather +
-// AirNow smoke), priced above /water/flood-risk to reflect that. Set by the
-// owner. Note there is no audited competitor revenue for wildfire specifically -
-// unlike SEC EDGAR and flood risk, this price rests on the composite-signal
-// argument rather than on an observed comparable.
-const PRICE_FIRE_RISK = "$0.39";
-// Composite signal across three NOAA SWPC feeds (planetary Kp + GOES X-ray flare
-// + active alerts). Set to $0.51 by explicit owner decision on 2026-07-30, making
-// it the most expensive route in the catalog, above /fire/risk at $0.39.
+// /water/flood-risk, /fire/risk and /space/weather: all $0.05 since 2026-11-11
+// (owner decision), down from $0.31 / $0.39 / $0.51. What the on-chain record
+// and the CDP Bazaar catalog showed on that date:
+//   - No outside wallet had ever paid $0.31, $0.39 or $0.51; every settlement
+//     on these routes came from this project's own test wallet.
+//   - All three had dropped out of the Bazaar catalog (no settlement in 30
+//     days), so agents searching it could not find them.
+//   - Between mid-September and 11 November our buyers made ~156k payments to
+//     listed x402 sellers and 97.5% were $0.05 or less. The largest repeat buyer
+//     here made 3,826 of them and never paid more than $0.05 for a call.
+// So $0.05 is the top of what the agents that actually buy here pay, and it is
+// what /sec/filings-search already sells at every week.
 //
-// Recorded honestly so a future session does not mistake this for evidence-based
-// pricing: there is NO audited competitor revenue for space weather. That is the
-// same position /fire/risk was in, and /fire/risk has drawn zero organic payers
-// at $0.39, while the only thing that has ever actually sold here was a $0.001
-// lookup. A $0.02 median-band price was recommended and declined. This rests on
-// the composite-signal argument alone.
+// Previous rationale, kept so it is not re-derived: flood-risk was priced off an
+// audited competitor settling ~$0.31/call for the same USGS/NOAA answer;
+// fire-risk and space-weather had no audited comparable and rested on the
+// composite-signal argument alone. None of the three produced a sale.
 //
-// One constraint it does satisfy: Agent402's router leaderboard caps counted
-// calls at maxCallUsd 0.75, so $0.51 still accrues to seller standing there.
-// Anything above $0.75 would silently stop counting.
-const PRICE_SPACE_WEATHER = "$0.51";
+// $0.05 is shared with /oil/price, /sec/filings-search and /route/hazards, so the
+// on-chain amount no longer identifies these routes -- attribute sales from the
+// [PAY] log lines. Keep any future price at or below $0.75: Agent402's router
+// leaderboard stops counting calls above maxCallUsd 0.75.
+const PRICE_FLOOD_RISK = "$0.05";
+const PRICE_FIRE_RISK = "$0.05";
+const PRICE_SPACE_WEATHER = "$0.05";
 // Composite over three sources (LocationIQ routing + NIFC wildfire incidents +
 // NWS active alerts). PLACEHOLDER PENDING OWNER DECISION -- there is no audited
 // competitor revenue for route-hazard products, the same evidence position
