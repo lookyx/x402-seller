@@ -11,22 +11,31 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 |---|---|---|
 | `GET /geo/lookup?address=...` | Address → lat/lng + IANA timezone (LocationIQ) | $0.001 |
 | `GET /geo/reverse?lat=...&lng=...` | Coordinates → place name + timezone (LocationIQ) | $0.001 |
-| `GET /oil/price?benchmark=wti\|brent` | Latest daily WTI/Brent spot price (EIA) | $0.05 |
+| `GET /oil/price?benchmark=wti\|brent` | Latest daily WTI/Brent spot price (EIA) | $0.005 |
 | `GET /gas/price` | Latest Henry Hub natural gas spot price (EIA) | $0.001 |
 | `GET /electricity/price?state=US` | Latest US retail electricity price, national or by state (EIA) | $0.001 |
-| `GET /weather/forecast?lat=...&lng=...` | Official US weather forecast by coordinates (NWS/NOAA, US only) | $0.001 |
+| `GET /weather/forecast?lat=...&lng=...` | Official US weather forecast by coordinates (NWS/NOAA, US only) | $0.01 |
 | `GET /nuclear/outages` | Daily US nuclear plant outage data (NRC via EIA) | $0.001 |
 | `GET /earthquakes/recent?minmagnitude=...&limit=...` | Recent significant earthquakes worldwide (USGS) | $0.001 |
 | `GET /currency/rate?from=...&to=...` | Official daily FX rate between 30+ currencies (ECB) | $0.008 |
-| `GET /air/quality?lat=...&lng=...` | Current US air quality index readings (EPA AirNow) | $0.001 |
+| `GET /air/quality?lat=...&lng=...` | Current air quality index readings from the nearest monitors (EPA AirNow; US, Canada, Mexico) | $0.001 |
 | `GET /space/asteroids?date=...` | Near-Earth asteroids by closest approach date (NASA JPL) | $0.001 |
+| `GET /space/weather?alertWindowHours=24` | Geomagnetic storm level, latest solar flare and active alerts (NOAA SWPC) | $0.05 |
+| `GET /route/hazards?from=lat,lng&to=lat,lng` | US driving route with active wildfires and NWS alerts along it (LocationIQ, NIFC, NWS) | $0.05 |
 | `GET /chain/balance?address=...&token=...` | Live ETH + ERC20 balance on Base mainnet (Base RPC) | $0.012 |
 | `GET /treasury/debt` | Latest total US national debt "to the penny" (US Treasury) | $0.001 |
 | `GET /ocean/tides?station=...` or `?lat=...&lng=...` | Tide predictions (next 48h) or latest water level at US coastal stations, nearest-station lookup by coordinates (NOAA CO-OPS) | $0.001 |
 | `GET /water/streamflow?site=...` | Real-time river streamflow + gauge height at US stream gauges (USGS) | $0.001 |
+| `GET /water/flood-risk?site=...` | River level against official NWS flood stages, with flood category and trend (USGS, NOAA) | $0.05 |
+| `GET /fire/risk?lat=...&lng=...` | Active US wildfires near a point, with fire weather and smoke (NIFC, NWS, AirNow) | $0.05 |
 | `GET /payments/history?hours=24&address=...` | This seller's own recent USDC settlement history on Base (self-referential, max 72h window) | $0.001 |
 | `GET /census/demographics?zip=...` | US Census ACS 5-Year population, median income, median age, and housing units by ZIP code (Census Bureau) | $0.001 |
 | `GET /sec/filings-search?q=...&forms=10-K` | Full-text search across all SEC EDGAR filings since 2001, by keyword/company/topic (SEC EDGAR) | $0.05 |
+
+Every endpoint is also an MCP tool at `POST /mcp`, at the same price as its HTTP route.
+The prices above are set by the `PRICE_*` constants in `server.js`; the root page, the
+`/.well-known/x402` manifest, the OpenAPI document and the MCP tools all read them from
+there, so this table is the only copy that has to be updated by hand after a reprice.
 
 All data sources are either explicitly licensed for commercial resale (LocationIQ) or
 official public-domain government data with no redistribution restriction (EIA, NWS).
@@ -159,6 +168,20 @@ redistribution restrictions. Lessons learned building this:
   with genuine daily/monthly freshness.
 - **NWS/NOAA** — free, no key, public domain, but requires a descriptive `User-Agent`
   header (rejects requests without one) and only covers US locations.
+- **EPA AirNow** — free with a key, but endpoints get retired: `/aq/observation/latLong/current/`
+  was switched off on 2026-09-30 and has returned `410` since, so `/air/quality` (and the
+  smoke reading in `/fire/risk`) failed on every call from 2026-10-01 until the move in
+  mid-November. The replacement is `/aq/observation/current/ziplatlong/` (same key). It
+  returns one record per pollutant from the closest monitor, has no state code and no
+  `distance` input, and signals "nothing nearby" with `HTTP 200` and a `WebServiceError`
+  body rather than an empty array — the handler has to inspect the body, as with Census
+  and SEC below.
+- **Base public RPCs** — `mainnet.base.org` still serves balances but now refuses every
+  `eth_getLogs` with `429`, so `/payments/history` reads logs from
+  `base-rpc.publicnode.com` (50,000-block ranges) with `base.gateway.tenderly.co`
+  (1,000-block ranges) as a slow fallback. Base's block time also changed (2 s to 0.2 s
+  in early November 2026), so the handler finds its start block by timestamp instead of
+  assuming a fixed number of blocks per hour.
 - **US Census Bureau (ACS 5-Year)** — public domain, no resale restriction, but a
   May 2026 policy change now requires an API key on *every* call (previously ~500/day
   were free without one). A missing/invalid key doesn't error — it 302-redirects to an
@@ -211,7 +234,11 @@ Price is no longer uniform across routes, though: most endpoints default to `$0.
 real evidence (a competitor's actual on-chain settlement volume at that price, checked
 directly via `eth_getLogs` against their payout wallet — not just their listed price,
 which turned out to be a weak signal on its own). See `PRICE_SEC_FILINGS_SEARCH`,
-`PRICE_OIL`, `PRICE_CURRENCY_RATE`, and `PRICE_CHAIN_BALANCE` in `server.js`.
+`PRICE_OIL`, `PRICE_CURRENCY_RATE`, and `PRICE_CHAIN_BALANCE` in `server.js`. Two of
+those bets were later reversed on this project's own sales data: the three composite
+routes came down from $0.31–$0.51 to $0.05 after no outside buyer ever paid the higher
+prices, and `/oil/price` went back from $0.05 to $0.005 after its sales fell from nine
+a month to one.
 
 x402 also supports `upto` (usage-based pricing) and batch settlement for high-frequency
 buyers — worth adopting once real traffic patterns justify it.

@@ -212,13 +212,13 @@ const UPSTREAM_TIMEOUT_MS = 12_000;
 
 const PRICE_PER_LOOKUP = "$0.001";
 const PRICE_SEC_FILINGS_SEARCH = "$0.05";
-// Raised from $0.005 to $0.05 by owner decision on 2026-10-06. It had become the
-// most-bought identifiable route (9 organic sales from 6 wallets in the prior 31
-// days). Note it now shares $0.05 with /sec/filings-search, /route/hazards and
-// (since 2026-11-11) /water/flood-risk, /fire/risk and /space/weather, so the
-// on-chain amount no longer identifies an oil sale -- use the [PAY] log lines,
-// which carry the route, to attribute it.
-const PRICE_OIL = "$0.05";
+// Back to $0.005 on 2026-11-13 (owner decision). It was raised to $0.05 on
+// 2026-10-06 because it had become the most-bought identifiable route (9 organic
+// sales from 6 wallets in the prior 31 days). In the 30 days after the rise the
+// Bazaar catalog counted one sale, and a competitor lists the same EIA series at
+// $0.0014. No other route charges $0.005, so the on-chain amount identifies an
+// oil sale again.
+const PRICE_OIL = "$0.005";
 const PRICE_CURRENCY_RATE = "$0.008";
 const PRICE_CHAIN_BALANCE = "$0.012";
 // Raised from the $0.001 default after this route took the project's first
@@ -244,9 +244,9 @@ const PRICE_WEATHER_FORECAST = "$0.01";
 // fire-risk and space-weather had no audited comparable and rested on the
 // composite-signal argument alone. None of the three produced a sale.
 //
-// $0.05 is shared with /oil/price, /sec/filings-search and /route/hazards, so the
-// on-chain amount no longer identifies these routes -- attribute sales from the
-// [PAY] log lines. Keep any future price at or below $0.75: Agent402's router
+// $0.05 is shared with /sec/filings-search and /route/hazards, so the on-chain
+// amount does not identify these routes -- attribute sales from the [PAY] log
+// lines. Keep any future price at or below $0.75: Agent402's router
 // leaderboard stops counting calls above maxCallUsd 0.75.
 const PRICE_FLOOD_RISK = "$0.05";
 const PRICE_FIRE_RISK = "$0.05";
@@ -535,16 +535,19 @@ const PAYMENT_ROUTES = {
             },
             output: {
               example: {
-                reportingArea: "San Francisco", stateCode: "CA", date: "2026-07-16", hour: 14,
-                readings: [{ pollutant: "PM2.5", aqi: 42, category: "Good" }, { pollutant: "O3", aqi: 38, category: "Good" }],
+                reportingArea: "Central LA CO", date: "2026-11-13", hour: 18, timeZone: "PST",
+                readings: [
+                  { pollutant: "PM2.5", aqi: 42, category: "Good", site: "Los Angeles - N. Main Street" },
+                  { pollutant: "O3", aqi: 37, category: "Good", site: "Los Angeles - N. Main Street" },
+                ],
                 preliminary: true,
                 attribution: "Data owned by federal, state, local, and tribal air quality agencies, distributed via the U.S. EPA AirNow program.",
                 source: "U.S. EPA AirNow",
               },
               schema: {
                 properties: {
-                  reportingArea: { type: "string" }, stateCode: { type: "string" },
-                  date: { type: "string" }, hour: { type: "number" },
+                  reportingArea: { type: ["string", "null"] },
+                  date: { type: "string" }, hour: { type: ["number", "null"] }, timeZone: { type: ["string", "null"] },
                   readings: { type: "array" }, preliminary: { type: "boolean" },
                   attribution: { type: "string" }, source: { type: "string" },
                 },
@@ -1088,6 +1091,20 @@ app.use((req, res, next) => {
 
 app.use(paymentMiddleware(PAYMENT_ROUTES, resourceServer));
 
+// Each route's price, read back out of PAYMENT_ROUTES. The root page, the
+// /.well-known/x402 manifest, the OpenAPI description and the MCP tools all
+// build their price text from this, so none of them can drift from what the
+// 402 charges. Before 2026-11 they each used PRICE_PER_LOOKUP directly and went
+// on saying "$0.001" for every endpoint long after pricing stopped being
+// uniform -- the same bug class as the OpenAPI x-price (gotcha #47), and for MCP
+// it was not just text: every tool really did charge $0.001.
+const ROUTE_PRICES = Object.fromEntries(
+  Object.entries(PAYMENT_ROUTES).map(([key, config]) => [key.slice(key.indexOf(" ") + 1), config.accepts[0].price]),
+);
+const priceUsd = (price) => Number(price.replace("$", ""));
+const SORTED_PRICES = Object.values(ROUTE_PRICES).sort((a, b) => priceUsd(a) - priceUsd(b));
+const PRICE_RANGE = `${SORTED_PRICES[0]} to ${SORTED_PRICES[SORTED_PRICES.length - 1]}`;
+
 app.get("/", (req, res) => {
   res.json({
     name: "Data Lookup API",
@@ -1117,7 +1134,8 @@ app.get("/", (req, res) => {
       "GET /census/demographics?zip=10001 (US Census ACS 5-Year population/income/age/housing by ZIP)",
       "GET /sec/filings-search?q=chip+shortage&forms=10-K (full-text search across all SEC EDGAR filings since 2001)",
     ],
-    price_per_call: PRICE_PER_LOOKUP,
+    price_per_call: `${PRICE_RANGE} depending on the endpoint; see prices`,
+    prices: ROUTE_PRICES,
     protocol: "x402",
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
@@ -1221,7 +1239,7 @@ function buildOpenApi() {
     info: {
       title: "Data Lookup API (x402-seller)",
       version: DEPLOY_VERSION,
-      description: `Pay-per-call data API for AI agents via the x402 protocol. Every endpoint costs ${PRICE_PER_LOOKUP} in USDC on Base — no accounts, no API keys. Call any endpoint, receive a 402 with payment requirements, retry with a signed payment header.`,
+      description: `Pay-per-call data API for AI agents via the x402 protocol. Each call costs ${PRICE_RANGE} in USDC on Base depending on the endpoint (see its x-price) — no accounts, no API keys. Call any endpoint, receive a 402 with payment requirements, retry with a signed payment header.`,
     },
     servers: [{ url: BASE_URL }],
     tags: [...new Set(Object.values(ROUTE_META).flatMap((m) => m.tags))].map((t) => ({ name: t })),
@@ -1234,7 +1252,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: "21 pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, space weather, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.",
+    summary: `${Object.keys(PAYMENT_ROUTES).length} pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, driving-route hazards, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, space weather, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.`,
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
@@ -1243,13 +1261,17 @@ function buildX402Manifest() {
       scheme: "exact",
       network: NETWORK,
       currency: "USDC",
+      // pricePerCall is the default and stays as it was for anything that reads
+      // it; pricePerResource is every route's actual price, the same figure as
+      // its 402 and its OpenAPI x-price.
       pricePerCall: PRICE_PER_LOOKUP,
+      pricePerResource: Object.fromEntries(Object.entries(ROUTE_PRICES).map(([path, price]) => [`${BASE_URL}${path}`, price])),
       payTo: PAY_TO,
       facilitator: USING_CDP ? "CDP" : FACILITATOR_URL,
     },
     mcp: {
       remoteConnector: `${BASE_URL}/mcp`,
-      remoteNote: "Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs $0.001 in USDC on Base, paid in-band via x402 (_meta[\"x402/payment\"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.",
+      remoteNote: `Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs the same as its HTTP route (${PRICE_RANGE}, stated in the tool description) in USDC on Base, paid in-band via x402 (_meta["x402/payment"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.`,
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
     attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
@@ -1558,19 +1580,54 @@ async function currencyRateLogic(args) {
 }
 app.get("/currency/rate", (req, res) => runHandler(res, () => currencyRateLogic(req.query)));
 
+// AirNow retired /aq/observation/latLong/current/ on 2026-09-30. It has answered
+// HTTP 410 since, so this route -- and /fire/risk's smoke reading, which calls
+// it -- failed on every call from 2026-10-01 until it moved to the replacement
+// below. What the replacement does differently, each point checked against the
+// live service on 2026-11-13 rather than taken from the docs:
+//   - One record per pollutant, each from the closest monitor reporting it, so
+//     two readings can come from two sites. `site` is passed through because
+//     that monitor can be far away (San Francisco is answered from Vacaville).
+//   - No `distance` input: it searches the reporting area, else 50 miles, and
+//     ignores a `distance` param if one is sent.
+//   - No state code, so `stateCode` is gone from this route's response.
+//   - camelCase fields; the AQI is `nowcastAQI`; ozone is "OZONE" (was "O3",
+//     still returned as "O3"); `hourObserved` is "18:00" (was the number 18,
+//     still returned as a number).
+//   - "Nothing nearby" is HTTP 200 with a WebServiceError body, not an empty
+//     array, and a non-numeric coordinate is HTTP 400.
+const AIRNOW_CURRENT_URL = "https://www.airnowapi.org/aq/observation/current/ziplatlong/";
+
 async function airQualityLogic({ lat, lng }) {
   if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
+  // Validated here because AirNow's 400 for a bad coordinate would otherwise
+  // come back from us as a 502, blaming the upstream for the caller's input.
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) throw new HttpError(400, "lat and lng must be numbers");
+  if (latNum < -90 || latNum > 90) throw new HttpError(400, "lat must be between -90 and 90");
+  if (lngNum < -180 || lngNum > 180) throw new HttpError(400, "lng must be between -180 and 180");
   try {
-    const { data } = await axios.get("https://www.airnowapi.org/aq/observation/latLong/current/", {
+    const { data } = await axios.get(AIRNOW_CURRENT_URL, {
       timeout: UPSTREAM_TIMEOUT_MS,
-      params: { format: "application/json", latitude: lat, longitude: lng, distance: 25, API_KEY: AIRNOW_API_KEY },
+      params: { format: "application/json", latitude: latNum, longitude: lngNum, API_KEY: AIRNOW_API_KEY },
     });
-    if (!Array.isArray(data) || data.length === 0) throw new HttpError(404, "No air quality data available near this location");
+    if (!Array.isArray(data)) {
+      const message = data?.WebServiceError?.[0]?.Message || "";
+      if (/no observations/i.test(message)) throw new HttpError(404, "No air quality data available near this location");
+      throw new Error(`Unexpected AirNow response: ${message || JSON.stringify(data).slice(0, 200)}`);
+    }
+    if (data.length === 0) throw new HttpError(404, "No air quality data available near this location");
     const first = data[0];
-    const readings = data.map((r) => ({ pollutant: r.ParameterName, aqi: r.AQI, category: r.Category?.Name }));
+    const hour = parseInt(first.hourObserved, 10);
+    const readings = data.map((r) => ({
+      pollutant: r.parameterName === "OZONE" ? "O3" : r.parameterName,
+      aqi: r.nowcastAQI, category: r.aqiCategoryName, site: r.siteName ?? null,
+    }));
     return {
-      reportingArea: first.ReportingArea, stateCode: first.StateCode,
-      date: first.DateObserved?.trim(), hour: first.HourObserved, readings, preliminary: true,
+      reportingArea: first.reportingAreaName ?? null,
+      date: first.dateObserved, hour: Number.isFinite(hour) ? hour : null, timeZone: first.localTimeZone ?? null,
+      readings, preliminary: true,
       attribution: "Data owned by federal, state, local, and tribal air quality agencies, distributed via the U.S. EPA AirNow program. Preliminary, unvalidated data — not for regulatory use.",
       source: "U.S. EPA AirNow",
     };
@@ -1830,12 +1887,108 @@ app.get("/chain/balance", (req, res) => runHandler(res, () => chainBalanceLogic(
 // the same latency problem that got /world/conflict-news removed earlier.
 const USDC_CONTRACT_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-const BASE_BLOCKS_PER_HOUR = Math.floor(3600 / 2); // ~2s block time
 const PAYMENT_HISTORY_DEFAULT_HOURS = 24;
 const PAYMENT_HISTORY_MAX_HOURS = 72;
 
+// eth_getLogs needs its own endpoints. mainnet.base.org (BASE_RPC_URL) still
+// serves eth_call and eth_getBalance, but it now answers every eth_getLogs with
+// 429 "request limit reached" -- found 2026-11-11, when this route was failing
+// on every call after ~28 s of retries and chunk-halving. These are tried in
+// order; `maxRange` is the widest block range each accepts without a key
+// (measured 2026-11-11). Both are keyless public RPCs serving on-chain data, so
+// the licensing position is the same as before (no explorer API involved).
+//
+// The second is a slow fallback only: at 1,000 blocks per call the default 24 h
+// window is ~430 calls. LOGS_MAX_CALLS stops a window that would need more than
+// that from starting at all, and the time budget fails the request (502, which
+// never charges the buyer) instead of letting it hang.
+const BASE_LOGS_RPCS = [
+  { url: "https://base-rpc.publicnode.com", maxRange: 50_000 },
+  { url: "https://base.gateway.tenderly.co", maxRange: 1_000 },
+];
+const LOGS_RPC_TIMEOUT_MS = 6_000;
+const LOGS_RPC_CONCURRENCY = 8;
+const LOGS_MAX_CALLS = 500;
+const PAYMENT_HISTORY_BUDGET_MS = 25_000;
+
 function padTopicAddress(address) {
   return "0x" + address.slice(2).toLowerCase().padStart(64, "0");
+}
+
+const toHex = (n) => "0x" + n.toString(16);
+
+async function logsRpcCall(rpc, method, params, attempts = 2) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const { data } = await axios.post(rpc.url, { jsonrpc: "2.0", id: 1, method, params }, { timeout: LOGS_RPC_TIMEOUT_MS });
+      if (data?.error) throw new Error(`${method}: ${data.error.message || "RPC error"}`);
+      if (data?.result === undefined) throw new Error(`${method}: empty RPC response`);
+      return data.result;
+    } catch (err) {
+      if (i === attempts - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+}
+
+async function blockHeader(rpc, number) {
+  const block = await logsRpcCall(rpc, "eth_getBlockByNumber", [number === "latest" ? "latest" : toHex(number), false]);
+  if (!block) throw new Error(`eth_getBlockByNumber: block ${number} not available`);
+  return { number: parseInt(block.number, 16), timestamp: parseInt(block.timestamp, 16) };
+}
+
+// Newest block at or before `targetTs`, to within a few seconds. Base's block
+// time is not a constant -- 2 s until early November 2026, 0.2 s since -- and the
+// fixed "1,800 blocks per hour" this replaces had quietly shrunk a requested
+// 24 h window to about 2.4 h. So: measure the current rate, bracket the target
+// (doubling back if the rate changed inside the window), then close in.
+async function blockAtOrBefore(rpc, targetTs, latest) {
+  const sample = await blockHeader(rpc, Math.max(0, latest.number - 20_000));
+  const secPerBlock = Math.max((latest.timestamp - sample.timestamp) / Math.max(1, latest.number - sample.number), 0.01);
+  let span = Math.ceil(((latest.timestamp - targetTs) / secPerBlock) * 1.05) + 50;
+  let hi = latest;
+  let lo = await blockHeader(rpc, Math.max(0, latest.number - span));
+  while (lo.timestamp > targetTs && lo.number > 0) {
+    hi = lo;
+    span *= 2;
+    lo = await blockHeader(rpc, Math.max(0, latest.number - span));
+  }
+  // Interpolate first (block times are near-uniform, so this usually lands in
+  // one or two steps), then bisect so an uneven stretch still converges.
+  for (let i = 0; i < 24 && hi.number - lo.number > 1 && targetTs - lo.timestamp > 5; i++) {
+    const fraction = (targetTs - lo.timestamp) / (hi.timestamp - lo.timestamp);
+    const guess = i < 4 ? Math.floor(lo.number + fraction * (hi.number - lo.number)) : Math.floor((lo.number + hi.number) / 2);
+    const mid = await blockHeader(rpc, Math.min(hi.number - 1, Math.max(lo.number + 1, guess)));
+    if (mid.timestamp <= targetTs) lo = mid;
+    else hi = mid;
+  }
+  return lo.number;
+}
+
+// Every USDC Transfer into PAY_TO over the last `hours`, from one endpoint.
+// The window is measured in chain time (the latest block's timestamp), not this
+// server's clock.
+async function scanPaymentLogs(rpc, topics, hours, deadline) {
+  const latest = await blockHeader(rpc, "latest");
+  const startBlock = await blockAtOrBefore(rpc, latest.timestamp - hours * 3600, latest);
+  const ranges = [];
+  for (let from = startBlock; from <= latest.number; from += rpc.maxRange) {
+    ranges.push([from, Math.min(from + rpc.maxRange - 1, latest.number)]);
+  }
+  if (ranges.length > LOGS_MAX_CALLS) {
+    throw new Error(`a ${hours} h window needs ${ranges.length} eth_getLogs calls at ${rpc.maxRange} blocks each`);
+  }
+  const logs = [];
+  for (let i = 0; i < ranges.length; i += LOGS_RPC_CONCURRENCY) {
+    if (Date.now() > deadline) throw new Error("ran out of time");
+    const batch = await Promise.all(
+      ranges.slice(i, i + LOGS_RPC_CONCURRENCY).map(([from, to]) =>
+        logsRpcCall(rpc, "eth_getLogs", [{ address: USDC_CONTRACT_BASE, topics, fromBlock: toHex(from), toBlock: toHex(to) }]),
+      ),
+    );
+    for (const chunk of batch) logs.push(...chunk);
+  }
+  return logs;
 }
 
 async function paymentHistoryLogic(args) {
@@ -1851,52 +2004,39 @@ async function paymentHistoryLogic(args) {
     fromAddress = args.address.toLowerCase();
   }
 
-  try {
-    const latest = parseInt(await baseRpcCall("eth_blockNumber", []), 16);
-    const blockSpan = Math.floor(hours * BASE_BLOCKS_PER_HOUR);
-    const startBlock = Math.max(0, latest - blockSpan);
-    const topics = [ERC20_TRANSFER_TOPIC, fromAddress ? padTopicAddress(fromAddress) : null, padTopicAddress(PAY_TO)];
-
-    let chunk = 10_000;
-    let cursor = startBlock;
-    const payments = [];
-    while (cursor <= latest) {
-      const end = Math.min(cursor + chunk - 1, latest);
-      try {
-        const logs = await baseRpcCall("eth_getLogs", [{
-          address: USDC_CONTRACT_BASE, topics,
-          fromBlock: "0x" + cursor.toString(16), toBlock: "0x" + end.toString(16),
-        }]);
-        for (const log of logs) {
-          payments.push({
-            txHash: log.transactionHash,
-            from: "0x" + log.topics[1].slice(26),
-            amountUsdc: parseInt(log.data, 16) / 1e6,
-            block: parseInt(log.blockNumber, 16),
-          });
-        }
-        cursor = end + 1;
-      } catch (err) {
-        if (chunk <= 500) throw err;
-        chunk = Math.max(500, Math.floor(chunk / 2));
-      }
+  const topics = [ERC20_TRANSFER_TOPIC, fromAddress ? padTopicAddress(fromAddress) : null, padTopicAddress(PAY_TO)];
+  const deadline = Date.now() + PAYMENT_HISTORY_BUDGET_MS;
+  let logs = null;
+  for (const rpc of BASE_LOGS_RPCS) {
+    try {
+      logs = await scanPaymentLogs(rpc, topics, hours, deadline);
+      break;
+    } catch (err) {
+      // Which endpoint failed and why is the whole diagnosis, so log both.
+      console.error(`[payments/history] ${rpc.url} failed: ${err.response?.status ? `HTTP ${err.response.status}` : err.message}`);
     }
-    payments.sort((a, b) => b.block - a.block);
-
-    return {
-      payTo: PAY_TO,
-      windowHours: hours,
-      ...(fromAddress ? { filteredByPayer: fromAddress } : {}),
-      count: payments.length,
-      payments,
-      note: `Settlements to this seller's own wallet on Base mainnet, USDC only, over the last ${hours} hour(s) (max ${PAYMENT_HISTORY_MAX_HOURS}). Independently verifiable on any Base block explorer.`,
-      source: "Base mainnet public RPC (on-chain USDC Transfer event logs)",
-    };
-  } catch (err) {
-    if (err instanceof HttpError) throw err;
-    console.error(err.response?.data || err.message);
-    throw new HttpError(502, "Upstream Base RPC lookup failed");
+    if (Date.now() > deadline) break;
   }
+  if (!logs) throw new HttpError(502, "Upstream Base RPC lookup failed");
+
+  const payments = logs
+    .map((log) => ({
+      txHash: log.transactionHash,
+      from: "0x" + log.topics[1].slice(26),
+      amountUsdc: parseInt(log.data, 16) / 1e6,
+      block: parseInt(log.blockNumber, 16),
+    }))
+    .sort((a, b) => b.block - a.block);
+
+  return {
+    payTo: PAY_TO,
+    windowHours: hours,
+    ...(fromAddress ? { filteredByPayer: fromAddress } : {}),
+    count: payments.length,
+    payments,
+    note: `Settlements to this seller's own wallet on Base mainnet, USDC only, over the last ${hours} hour(s) (max ${PAYMENT_HISTORY_MAX_HOURS}). Independently verifiable on any Base block explorer.`,
+    source: "Base mainnet public RPC (on-chain USDC Transfer event logs)",
+  };
 }
 app.get("/payments/history", (req, res) => runHandler(res, () => paymentHistoryLogic(req.query)));
 
@@ -2896,14 +3036,22 @@ let mcpTools = null;
 (async () => {
   try {
     await withTimeout(resourceServer.initialize(), 10_000, "resourceServer.initialize()");
-    const mcpAccepts = await withTimeout(
-      resourceServer.buildPaymentRequirements({ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: PRICE_PER_LOOKUP }),
+    // One set of payment requirements per distinct price, so that each tool
+    // charges what its HTTP route charges. This used to be a single set built
+    // from PRICE_PER_LOOKUP, which sold every route -- the $0.05 ones included --
+    // for $0.001 to any caller that came in over MCP instead of HTTP.
+    const mcpAcceptsByPrice = new Map();
+    await withTimeout(
+      Promise.all([...new Set(Object.values(ROUTE_PRICES))].map(async (price) => {
+        mcpAcceptsByPrice.set(price, await resourceServer.buildPaymentRequirements({ scheme: "exact", network: NETWORK, payTo: PAY_TO, price }));
+      })),
       10_000,
       "buildPaymentRequirements()"
     );
     mcpTools = MCP_TOOL_DEFS.map(({ path, logic }) => {
       const name = toSnakeCase(ROUTE_META[path].operationId);
-      const description = `${PAYMENT_ROUTES[`GET ${path}`].description} Costs ${PRICE_PER_LOOKUP} per call, paid via x402 (USDC on Base).`;
+      const price = ROUTE_PRICES[path];
+      const description = `${PAYMENT_ROUTES[`GET ${path}`].description} Costs ${price} per call, paid via x402 (USDC on Base).`;
       // No bazaar extension here: @x402/mcp's own toolName-extraction requires
       // resource.url to be a synthetic "mcp://tool/<name>" URI (it strips that
       // literal prefix to get the name), but CDP's Bazaar rejects any resource
@@ -2913,7 +3061,7 @@ let mcpTools = null;
       // field in /.well-known/x402 (a real https URL), which is what Agent402's
       // crawler actually reads.
       const paid = createPaymentWrapper(resourceServer, {
-        accepts: mcpAccepts,
+        accepts: mcpAcceptsByPrice.get(price),
         resource: { url: `mcp://tool/${name}`, description, mimeType: "application/json", serviceName: "Data Lookup API (x402-seller)" },
       });
       const callback = paid(async (args) => {
