@@ -1,7 +1,13 @@
 ﻿import "dotenv/config";
 import express from "express";
 import axios from "axios";
-import { find as findTimezone } from "geo-tz";
+// "geo-tz/all", not the package default. The default dataset merges every zone
+// that has kept the same clock since 1970 and names the result after its largest
+// city, so it reports Oslo as Europe/Berlin, Bangkok as Asia/Jakarta, Nairobi as
+// Asia/Riyadh and Reykjavik as Africa/Abidjan: right offset, wrong name. The
+// full dataset returns the place's own zone at the same speed and memory
+// (measured 2026-11-14: 400 lookups in ~1 s, +10 MB, for either).
+import { find as findTimezone } from "geo-tz/all";
 import { XMLParser } from "fast-xml-parser";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
@@ -225,6 +231,9 @@ const PRICE_CHAIN_BALANCE = "$0.012";
 // organic sale (2026-07-27). $0.01 is the catalog median, so it stays mid-market
 // rather than premium. Note the sole known buyer paid $0.001, so this is a
 // deliberate bet that demand survives a 10x - watch whether they return.
+// Unchanged when the route went worldwide (2026-11): one other seller's
+// worldwide city-weather route drew 47 payers in 30 days at this same price,
+// against 3 here while the route was U.S.-only.
 const PRICE_WEATHER_FORECAST = "$0.01";
 // /water/flood-risk, /fire/risk and /space/weather: all $0.05 since 2026-11-11
 // (owner decision), down from $0.31 / $0.39 / $0.51. What the on-chain record
@@ -281,7 +290,7 @@ const ROUTE_TAGS = {
   "/oil/price": ["energy", "finance"],
   "/gas/price": ["energy", "finance"],
   "/electricity/price": ["energy"],
-  "/weather/forecast": ["weather"],
+  "/weather/forecast": ["weather", "forecast", "global", "alerts"],
   "/nuclear/outages": ["energy"],
   "/earthquakes/recent": ["geology", "hazards"],
   "/currency/rate": ["finance"],
@@ -418,30 +427,44 @@ const PAYMENT_ROUTES = {
       },
       "GET /weather/forecast": {
         accepts: [{ scheme: "exact", price: PRICE_WEATHER_FORECAST, network: NETWORK, payTo: PAY_TO }],
-        description: "Official U.S. National Weather Service (NWS) forecast for the next period — the nearest upcoming forecast window, e.g. today, tonight, or tomorrow — at a given latitude/longitude. US locations only. Use /geo/lookup first if you only have an address.",
+        description: "Weather for any place on Earth, by place name or latitude/longitude: current conditions, the next 24 hours hour by hour and a 7-day outlook (temperature, precipitation, wind, humidity, cloud cover) in the location's local time, plus active severe-weather alerts for U.S. locations. Metric by default; units=imperial for Fahrenheit and mph. Forecast from MET Norway, U.S. alerts from NWS.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
-            input: { lat: "38.8894", lng: "-77.0352" },
+            input: { place: "Paris, France" },
             inputSchema: {
               properties: {
-                lat: { type: "string", description: "Latitude (US locations only)" },
-                lng: { type: "string", description: "Longitude (US locations only)" },
+                place: { type: "string", description: "City, address or place name, anywhere in the world (e.g. \"Nairobi\"). Ignored if lat and lng are given." },
+                lat: { type: "string", description: "Latitude, -90 to 90 (use with lng instead of place)" },
+                lng: { type: "string", description: "Longitude, -180 to 180 (use with lat instead of place)" },
+                units: { type: "string", enum: ["metric", "imperial"], description: "metric (default: Celsius, m/s, mm) or imperial (Fahrenheit, mph, inches)" },
               },
-              required: ["lat", "lng"],
+              required: [],
             },
             output: {
+              // Shortened: a real answer carries 24 hourly and 7 daily entries.
               example: {
-                location: "LWX", period: "Tonight", temperature: 68, temperatureUnit: "F",
-                shortForecast: "Partly Cloudy", detailedForecast: "Partly cloudy, with a low around 68.",
-                windSpeed: "5 mph", windDirection: "SW", source: "National Weather Service (NOAA)",
+                location: { name: "Paris, Ile-de-France, France", lat: 48.8535, lng: 2.3484, timezone: "Europe/Paris", elevationM: 43 },
+                current: {
+                  time: "2026-11-14T20:00:00Z", localTime: "2026-11-14T21:00", summary: "Partly cloudy", daylight: false,
+                  temperature: 4.6, windSpeed: 2.4, windDirection: "SE", humidity: 85, cloudCover: 95, pressure: 1012, precipitationNextHour: 0,
+                },
+                hourly: [{ time: "2026-11-14T22:00", summary: "Cloudy", temperature: 4.4, precipitation: 0, windSpeed: 2.6 }],
+                daily: [{ date: "2026-11-15", summary: "Light rain", temperatureMin: 3.9, temperatureMax: 9.8, precipitation: 2.3 }],
+                alerts: null,
+                alertsNote: "Severe-weather alerts are available for U.S. locations only.",
+                units: { temperature: "°C", windSpeed: "m/s", precipitation: "mm", pressure: "hPa" },
+                updatedAt: "2026-11-14T19:17:36Z",
+                attribution: "Forecast data from MET Norway (api.met.no), licensed CC BY 4.0.",
+                source: "MET Norway Locationforecast 2.0; U.S. National Weather Service (alerts)",
               },
               schema: {
                 properties: {
-                  period: { type: "string" }, temperature: { type: "number" },
-                  temperatureUnit: { type: "string" }, shortForecast: { type: "string" },
-                  detailedForecast: { type: "string" }, windSpeed: { type: "string" },
-                  windDirection: { type: "string" }, source: { type: "string" },
+                  location: { type: "object" }, current: { type: "object" },
+                  hourly: { type: "array" }, daily: { type: "array" },
+                  alerts: { type: ["array", "null"] }, alertsNote: { type: ["string", "null"] },
+                  units: { type: "object" }, updatedAt: { type: ["string", "null"] },
+                  attribution: { type: "string" }, source: { type: "string" },
                 },
               },
             },
@@ -1116,7 +1139,7 @@ app.get("/", (req, res) => {
       "GET /oil/price?benchmark=wti|brent (crude oil spot price)",
       "GET /gas/price (Henry Hub natural gas spot price)",
       "GET /electricity/price?state=US",
-      "GET /weather/forecast?lat=...&lng=... (US only)",
+      "GET /weather/forecast?place=Paris or lat=...&lng=... (worldwide; current, 24 h, 7 days; &units=imperial)",
       "GET /nuclear/outages",
       "GET /earthquakes/recent?minmagnitude=4.5&limit=10",
       "GET /currency/rate?from=USD&to=JPY",
@@ -1140,7 +1163,7 @@ app.get("/", (req, res) => {
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   });
 });
 
@@ -1160,7 +1183,7 @@ const ROUTE_META = {
   "/oil/price": { operationId: "oilPrice", summary: "Latest WTI or Brent crude oil spot price", tags: ROUTE_TAGS["/oil/price"] },
   "/gas/price": { operationId: "gasPrice", summary: "Latest Henry Hub natural gas spot price", tags: ROUTE_TAGS["/gas/price"] },
   "/electricity/price": { operationId: "electricityPrice", summary: "Latest US retail electricity price", tags: ROUTE_TAGS["/electricity/price"] },
-  "/weather/forecast": { operationId: "weatherForecast", summary: "Official US weather forecast by coordinates", tags: ROUTE_TAGS["/weather/forecast"] },
+  "/weather/forecast": { operationId: "weatherForecast", summary: "Worldwide weather by place name or coordinates: current conditions, 24-hour and 7-day forecast", tags: ROUTE_TAGS["/weather/forecast"] },
   "/nuclear/outages": { operationId: "nuclearOutages", summary: "Daily US nuclear power plant outage data", tags: ROUTE_TAGS["/nuclear/outages"] },
   "/earthquakes/recent": { operationId: "earthquakesRecent", summary: "Recent significant earthquakes worldwide", tags: ROUTE_TAGS["/earthquakes/recent"] },
   "/currency/rate": { operationId: "currencyRate", summary: "Official daily currency exchange rate", tags: ROUTE_TAGS["/currency/rate"] },
@@ -1274,7 +1297,7 @@ function buildX402Manifest() {
       remoteNote: `Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs the same as its HTTP route (${PRICE_RANGE}, stated in the tool description) in USDC on Base, paid in-band via x402 (_meta["x402/payment"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.`,
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
   };
 }
 
@@ -1469,30 +1492,233 @@ async function electricityPriceLogic(args) {
 }
 app.get("/electricity/price", (req, res) => runHandler(res, () => electricityPriceLogic(req.query)));
 
-async function weatherForecastLogic({ lat, lng }) {
-  if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
+// ---- /weather/forecast: worldwide since 2026-11 --------------------------------
+// This was the U.S.-only NWS "next period" forecast. It is now MET Norway's
+// Locationforecast, which answers for any coordinate on Earth, with LocationIQ
+// resolving a place name and NWS still supplying alerts for U.S. points.
+//
+// MET Norway's terms (https://api.met.no/doc/TermsOfService) shape most of what
+// follows, so they are listed here rather than rediscovered after a block:
+//   - Identify the application and a contact in the User-Agent. Their own example
+//     is "AcmeWeatherApp/0.9 github.com/acmeweatherapp". A missing, generic or
+//     fake one "risks being blocked without warning".
+//   - Never repeat a request before its Expires time; afterwards revalidate with
+//     If-Modified-Since. Hence the cache.
+//   - At most 4 decimals on coordinates.
+//   - CC BY 4.0: credit them, link the licence, say what was changed. Hence the
+//     wording of `attribution`.
+//   - Do not present the service as made by Yr, NRK or MET Norway.
+//   - Keep under 20 requests/second (this service is orders of magnitude below).
+const MET_USER_AGENT = "x402-seller/1.0 github.com/lookyx/x402-seller";
+const MET_FORECAST_URL = "https://api.met.no/weatherapi/locationforecast/2.0/compact";
+const MET_CACHE_MAX = 200;
+const metCache = new Map(); // "lat,lon" -> { body, lastModified, expiresAt }
+
+async function metForecast(lat, lon) {
+  const key = `${lat},${lon}`;
+  const cached = metCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached.body;
+  const resp = await axios.get(MET_FORECAST_URL, {
+    timeout: UPSTREAM_TIMEOUT_MS,
+    params: { lat, lon },
+    headers: { "User-Agent": MET_USER_AGENT, ...(cached?.lastModified ? { "If-Modified-Since": cached.lastModified } : {}) },
+    validateStatus: (status) => status === 200 || status === 203 || status === 304,
+  });
+  // 203 is how MET Norway announces that an API version is about to be retired.
+  if (resp.status === 203) console.warn("[weather] MET Norway answered 203: this Locationforecast version is deprecated");
+  const expires = Date.parse(resp.headers.expires);
+  const expiresAt = Number.isFinite(expires) ? expires : Date.now() + 10 * 60_000;
+  if (resp.status === 304 && cached) {
+    cached.expiresAt = expiresAt;
+    return cached.body;
+  }
+  metCache.delete(key);
+  metCache.set(key, { body: resp.data, lastModified: resp.headers["last-modified"] || null, expiresAt });
+  if (metCache.size > MET_CACHE_MAX) metCache.delete(metCache.keys().next().value);
+  return resp.data;
+}
+
+// MET Norway's symbol codes ("lightrainshowers_day", "heavysnowandthunder", ...)
+// are built from a small vocabulary, so they are spelled out rather than listed.
+// An unrecognised code is passed through unchanged instead of being guessed at.
+const MET_FIXED_SUMMARIES = { clearsky: "Clear sky", fair: "Fair", partlycloudy: "Partly cloudy", cloudy: "Cloudy", fog: "Fog" };
+function weatherSummary(symbolCode) {
+  if (!symbolCode) return null;
+  const code = symbolCode.replace(/_(day|night|polartwilight)$/, "");
+  if (MET_FIXED_SUMMARIES[code]) return MET_FIXED_SUMMARIES[code];
+  const parts = code.match(/^(lights?|heavy)?(rain|sleet|snow)(showers)?(andthunder)?$/);
+  if (!parts) return code;
+  const words = [parts[1] ? (parts[1] === "heavy" ? "heavy" : "light") : null, parts[2], parts[3] ? "showers" : null, parts[4] ? "and thunder" : null]
+    .filter(Boolean)
+    .join(" ");
+  return words[0].toUpperCase() + words.slice(1);
+}
+
+const WEATHER_UNITS = {
+  metric: { labels: { temperature: "°C", windSpeed: "m/s", precipitation: "mm", pressure: "hPa" }, temp: (c) => c, wind: (ms) => ms, precip: (mm) => mm, precipDecimals: 1 },
+  imperial: { labels: { temperature: "°F", windSpeed: "mph", precipitation: "in", pressure: "hPa" }, temp: (c) => (c * 9) / 5 + 32, wind: (ms) => ms * 2.236936, precip: (mm) => mm / 25.4, precipDecimals: 2 },
+};
+// Converts and rounds a reading, or returns null if MET Norway did not supply it.
+const reading = (value, convert, decimals = 1) => (typeof value === "number" && Number.isFinite(value) ? Number(convert(value).toFixed(decimals)) : null);
+
+// "2026-11-14T21:00" in the location's own time zone.
+function localTimeFormatter(timeZone) {
+  const format = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  return (iso) => {
+    const p = Object.fromEntries(format.formatToParts(new Date(iso)).map((part) => [part.type, part.value]));
+    return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+  };
+}
+
+// NWS answers 200 for any U.S. point (states and territories) and 400 for
+// anywhere else, in about 0.4 s either way (checked 2026-11-14). These boxes
+// only spare the rest of the world the pointless call; NWS still decides what
+// is actually covered, so a Canadian or Mexican point inside a box gets null.
+const NWS_ALERT_BOXES = [
+  [17, 72, -180, -64], // contiguous U.S., Alaska, Hawaii, Puerto Rico, U.S. Virgin Islands
+  [12, 21, 144, 147], // Guam, Northern Mariana Islands
+  [-15, -10, -172, -168], // American Samoa
+];
+const ALERTS_US_ONLY = "Severe-weather alerts are available for U.S. locations only.";
+
+// Best-effort: the forecast is the product, so a slow or failing alert lookup
+// yields alerts: null with the reason, never a failed (and unbilled) request.
+async function usWeatherAlerts(lat, lng) {
+  if (!NWS_ALERT_BOXES.some(([south, north, west, east]) => lat >= south && lat <= north && lng >= west && lng <= east)) {
+    return { alerts: null, alertsNote: ALERTS_US_ONLY };
+  }
   try {
-    const pointsResp = await axios.get(`https://api.weather.gov/points/${lat},${lng}`, {
-      timeout: UPSTREAM_TIMEOUT_MS,
+    const resp = await axios.get("https://api.weather.gov/alerts/active", {
+      params: { point: `${lat},${lng}` },
       headers: { "User-Agent": NWS_USER_AGENT },
+      timeout: 6_000,
+      validateStatus: (status) => status === 200 || status === 400,
     });
-    const forecastUrl = pointsResp.data?.properties?.forecast;
-    const gridId = pointsResp.data?.properties?.gridId;
-    if (!forecastUrl) throw new HttpError(502, "Could not resolve forecast URL for this location");
-    const forecastResp = await axios.get(forecastUrl, { headers: { "User-Agent": NWS_USER_AGENT }, timeout: UPSTREAM_TIMEOUT_MS });
-    const period = forecastResp.data?.properties?.periods?.[0];
-    if (!period) throw new HttpError(502, "No forecast data available for this location");
+    if (resp.status === 400) return { alerts: null, alertsNote: ALERTS_US_ONLY };
+    const alerts = (resp.data?.features || []).slice(0, 10).map(({ properties: p = {} }) => ({
+      event: p.event || null, severity: p.severity || null, urgency: p.urgency || null,
+      headline: p.headline || null, expires: p.ends || p.expires || null,
+    }));
+    return { alerts, alertsNote: null };
+  } catch {
+    return { alerts: null, alertsNote: "The U.S. alert lookup was unavailable for this request." };
+  }
+}
+
+async function weatherForecastLogic({ place, lat, lng, units }) {
+  const unitSystem = WEATHER_UNITS[String(units || "metric").toLowerCase()];
+  if (!unitSystem) throw new HttpError(400, "units must be metric or imperial");
+
+  let name = null;
+  let latNum;
+  let lngNum;
+  if (lat && lng) {
+    latNum = Number(lat);
+    lngNum = Number(lng);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) throw new HttpError(400, "lat and lng must be numbers");
+    if (latNum < -90 || latNum > 90) throw new HttpError(400, "lat must be between -90 and 90");
+    if (lngNum < -180 || lngNum > 180) throw new HttpError(400, "lng must be between -180 and 180");
+  } else if (place) {
+    const match = await geoLookupLogic({ address: place }); // 404 if nothing matches
+    name = match.display_name;
+    latNum = match.lat;
+    lngNum = match.lng;
+  } else {
+    throw new HttpError(400, "Provide either place, or both lat and lng");
+  }
+  latNum = Number(latNum.toFixed(4));
+  lngNum = Number(lngNum.toFixed(4));
+
+  try {
+    const [forecast, us] = await Promise.all([metForecast(latNum, lngNum), usWeatherAlerts(latNum, lngNum)]);
+    const series = forecast?.properties?.timeseries || [];
+    if (series.length === 0) throw new HttpError(502, "No forecast data available for this location");
+
+    const timeZone = findTimezone(latNum, lngNum)[0] || "UTC";
+    const localTime = localTimeFormatter(timeZone);
+    const { temp, wind, precip, precipDecimals } = unitSystem;
+    const symbolOf = (step) => step.data.next_1_hours?.summary?.symbol_code || step.data.next_6_hours?.summary?.symbol_code || step.data.next_12_hours?.summary?.symbol_code || null;
+
+    // The series starts at the top of the hour it was issued for, and a cached
+    // copy can be up to an hour old, so "now" is the latest step not in the future.
+    let nowIndex = 0;
+    for (let i = 0; i < series.length && Date.parse(series[i].time) <= Date.now(); i++) nowIndex = i;
+    const nowStep = series[nowIndex];
+    const now = nowStep.data.instant.details;
+    const nowSymbol = symbolOf(nowStep);
+
+    const hourly = series.slice(nowIndex + 1, nowIndex + 25).map((step) => ({
+      time: localTime(step.time),
+      summary: weatherSummary(symbolOf(step)),
+      temperature: reading(step.data.instant.details.air_temperature, temp),
+      precipitation: reading(step.data.next_1_hours?.details?.precipitation_amount ?? step.data.next_6_hours?.details?.precipitation_amount, precip, precipDecimals),
+      windSpeed: reading(step.data.instant.details.wind_speed, wind),
+    }));
+
+    // Daily values are this service's own roll-up of MET Norway's steps (hourly
+    // for about two and a half days, six-hourly after that), grouped by the
+    // location's calendar day. Rain is summed from whichever period each step
+    // carries, so no hour is counted twice.
+    const days = new Map();
+    for (const step of series.slice(nowIndex)) {
+      const local = localTime(step.time);
+      const date = local.slice(0, 10);
+      if (!days.has(date)) days.set(date, { date, firstHour: Number(local.slice(11, 13)), temps: [], rain: 0, rainSteps: 0, midday: null });
+      const day = days.get(date);
+      const t = step.data.instant.details.air_temperature;
+      if (typeof t === "number") day.temps.push(t);
+      const amount = step.data.next_1_hours?.details?.precipitation_amount ?? step.data.next_6_hours?.details?.precipitation_amount;
+      if (typeof amount === "number") {
+        day.rain += amount;
+        day.rainSteps += 1;
+      }
+      const symbol = step.data.next_6_hours?.summary?.symbol_code || step.data.next_12_hours?.summary?.symbol_code || step.data.next_1_hours?.summary?.symbol_code;
+      const distance = Math.abs(Number(local.slice(11, 13)) - 12);
+      if (symbol && (!day.midday || distance < day.midday.distance)) day.midday = { symbol, distance };
+    }
+    const daily = [...days.values()]
+      .filter((day) => day.temps.length > 0)
+      .slice(0, 7)
+      .map((day, i) => ({
+        date: day.date,
+        summary: weatherSummary(day.midday?.symbol),
+        temperatureMin: reading(Math.min(...day.temps), temp),
+        temperatureMax: reading(Math.max(...day.temps), temp),
+        precipitation: day.rainSteps ? reading(day.rain, precip, precipDecimals) : null,
+        ...(i === 0 && day.firstHour > 0 ? { partialDay: true } : {}),
+      }));
+
     return {
-      location: gridId || null, period: period.name, temperature: period.temperature,
-      temperatureUnit: period.temperatureUnit, shortForecast: period.shortForecast,
-      detailedForecast: period.detailedForecast, windSpeed: period.windSpeed,
-      windDirection: period.windDirection, source: "National Weather Service (NOAA)",
+      location: {
+        name, lat: latNum, lng: lngNum, timezone: timeZone,
+        elevationM: typeof forecast?.geometry?.coordinates?.[2] === "number" ? forecast.geometry.coordinates[2] : null,
+      },
+      current: {
+        time: nowStep.time,
+        localTime: localTime(nowStep.time),
+        summary: weatherSummary(nowSymbol),
+        daylight: /_day$/.test(nowSymbol || "") ? true : /_night$/.test(nowSymbol || "") ? false : null,
+        temperature: reading(now.air_temperature, temp),
+        windSpeed: reading(now.wind_speed, wind),
+        windDirection: typeof now.wind_from_direction === "number" ? COMPASS[Math.round((((now.wind_from_direction % 360) + 360) % 360) / 22.5) % 16] : null,
+        humidity: reading(now.relative_humidity, (v) => v, 0),
+        cloudCover: reading(now.cloud_area_fraction, (v) => v, 0),
+        pressure: reading(now.air_pressure_at_sea_level, (v) => v, 0),
+        precipitationNextHour: reading(nowStep.data.next_1_hours?.details?.precipitation_amount, precip, precipDecimals),
+      },
+      hourly,
+      daily,
+      alerts: us.alerts,
+      alertsNote: us.alertsNote,
+      units: unitSystem.labels,
+      updatedAt: forecast?.properties?.meta?.updated_at || null,
+      attribution: "Forecast data from MET Norway (api.met.no), licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Text summaries, local times, unit conversions and daily values are derived from it by this service, which is not affiliated with or endorsed by MET Norway. U.S. alerts from the National Weather Service.",
+      source: "MET Norway Locationforecast 2.0; U.S. National Weather Service (alerts)",
     };
   } catch (err) {
     if (err instanceof HttpError) throw err;
-    if (err.response?.status === 404) throw new HttpError(404, "Location outside NWS coverage (US only)");
     console.error(err.response?.data || err.message);
-    throw new HttpError(502, "Upstream NWS lookup failed");
+    throw new HttpError(502, "Upstream MET Norway lookup failed");
   }
 }
 app.get("/weather/forecast", (req, res) => runHandler(res, () => weatherForecastLogic(req.query)));

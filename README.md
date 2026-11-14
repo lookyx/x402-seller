@@ -14,7 +14,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /oil/price?benchmark=wti\|brent` | Latest daily WTI/Brent spot price (EIA) | $0.005 |
 | `GET /gas/price` | Latest Henry Hub natural gas spot price (EIA) | $0.001 |
 | `GET /electricity/price?state=US` | Latest US retail electricity price, national or by state (EIA) | $0.001 |
-| `GET /weather/forecast?lat=...&lng=...` | Official US weather forecast by coordinates (NWS/NOAA, US only) | $0.01 |
+| `GET /weather/forecast?place=...` or `?lat=...&lng=...` | Worldwide weather: current conditions, next 24 hours and 7-day outlook in local time, plus active alerts for US locations (MET Norway, NWS; `&units=imperial`) | $0.01 |
 | `GET /nuclear/outages` | Daily US nuclear plant outage data (NRC via EIA) | $0.001 |
 | `GET /earthquakes/recent?minmagnitude=...&limit=...` | Recent significant earthquakes worldwide (USGS) | $0.001 |
 | `GET /currency/rate?from=...&to=...` | Official daily FX rate between 30+ currencies (ECB) | $0.008 |
@@ -37,8 +37,9 @@ The prices above are set by the `PRICE_*` constants in `server.js`; the root pag
 `/.well-known/x402` manifest, the OpenAPI document and the MCP tools all read them from
 there, so this table is the only copy that has to be updated by hand after a reprice.
 
-All data sources are either explicitly licensed for commercial resale (LocationIQ) or
-official public-domain government data with no redistribution restriction (EIA, NWS).
+All data sources are either explicitly licensed for commercial resale (LocationIQ),
+openly licensed with attribution (MET Norway, CC BY 4.0), or official public-domain
+government data with no redistribution restriction (EIA, NWS).
 See "Data sourcing" below before adding new endpoints — some obvious-looking free APIs
 (e.g. raw Nominatim, most commercial oil-price APIs) explicitly forbid this exact use case.
 
@@ -168,6 +169,19 @@ redistribution restrictions. Lessons learned building this:
   with genuine daily/monthly freshness.
 - **NWS/NOAA** — free, no key, public domain, but requires a descriptive `User-Agent`
   header (rejects requests without one) and only covers US locations.
+- **MET Norway (`api.met.no`)** — worldwide forecasts, no key, CC BY 4.0, commercial use
+  allowed. It replaced NWS as the forecast source for `/weather/forecast` (NWS is US-only
+  and now supplies only the alerts). Open-Meteo was ruled out: its free tier is
+  non-commercial. MET Norway's [terms](https://api.met.no/doc/TermsOfService) are
+  enforced by blocking, so the handler builds each one in: an identifying `User-Agent`
+  with a contact (the repository URL), coordinates cut to 4 decimals, no repeat request
+  before the response's `Expires` time and `If-Modified-Since` after it (a small
+  in-memory cache), attribution with the licence link and a note of what was derived,
+  and nothing that presents the service as MET Norway's, Yr's or NRK's. The terms also
+  ask that a human accept them when the calling code is AI-written.
+- **Time zone names** come from `geo-tz/all`, not the package default. The default merges
+  zones that have kept the same clock since 1970 and reports Oslo as `Europe/Berlin` and
+  Bangkok as `Asia/Jakarta`.
 - **EPA AirNow** — free with a key, but endpoints get retired: `/aq/observation/latLong/current/`
   was switched off on 2026-09-30 and has returned `410` since, so `/air/quality` (and the
   smoke reading in `/fire/risk`) failed on every call from 2026-10-01 until the move in
