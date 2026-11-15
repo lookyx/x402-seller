@@ -157,6 +157,13 @@ redistribution restrictions. Lessons learned building this:
   redistribution outright in their ToS, since real-time exchange data is licensed
   separately from the API subscription. **EIA** (U.S. government) has no such
   restriction and covers oil, gas, and electricity pricing.
+- **EIA has bad minutes.** A sweep of every route on 2026-11-14 lost 4 of its 12 EIA
+  calls to the 12-second limit inside one minute; 86 EIA calls in the half hour after it
+  all answered in under 0.6 seconds. Within a bad minute some requests answer and others
+  hang, so `/oil/price`, `/gas/price`, `/electricity/price` and `/nuclear/outages` go
+  through `upstreamGet`: three tries of 4 seconds each instead of one of 12. It retries
+  only when there was no answer or a 5xx, never a 4xx. `/water/streamflow` uses it too
+  (two tries), for the brief USGS 503s seen before.
 - **EIA v2 API quirks**: the `series_id` shorthand parameter (e.g. `PET.RWTC.D`) from
   the old v1 API is fully deprecated — current valid params are `frequency`, `data`,
   `facets`, `sort`, `offset`, `length`, `api_key`. Always verify a category's actual
