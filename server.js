@@ -1353,24 +1353,78 @@ async function runHandler(res, fn) {
 // in production 2026-08-26 on /geo/lookup?address=0xd8dA...(an ETH address).
 const isGeocodeNoMatch = (err) => err?.response?.status === 404;
 
-// LocationIQ's free tier refuses a request that arrives too soon after others on
-// the same key with {error:"Rate Limited Second"}. An agent asking about several
-// places at once does exactly that: in testing on 2026-11-14, 5 of 14 lookups
-// sent back to back were refused, and each refusal reached the caller as a 502.
-// That limit clears by itself within a second, so wait it out, twice at most.
-// The per-minute and per-day limits do not clear that fast and are not retried.
-const LOCATIONIQ_RETRIES = 2;
+// LocationIQ's free tier takes two requests a second on a key and refuses the
+// next with {error:"Rate Limited Second"}. An agent asking about several places
+// at once does exactly that: in testing on 2026-11-14, 5 of 14 lookups sent back
+// to back were refused, and each refusal reached the caller as a 502. So every
+// LocationIQ call takes a turn here: calls start at least LOCATIONIQ_SPACING_MS
+// apart, which costs a lone call nothing and a burst a fraction of a second each.
+// A refusal can still happen (the key is not this process's alone), and is then
+// retried on a later turn. The per-minute and per-day limits do not clear that
+// fast and are not retried. A queue longer than LOCATIONIQ_MAX_WAIT_MS is turned
+// away with a 503, which is not billed, rather than left to grow.
+const LOCATIONIQ_SPACING_MS = 600;
+const LOCATIONIQ_RETRIES = 3;
+const LOCATIONIQ_MAX_WAIT_MS = 8_000;
+let locationIqNextTurn = 0;
 async function locationIqGet(url, config) {
   for (let attempt = 0; ; attempt++) {
+    const now = Date.now();
+    const turn = Math.max(now, locationIqNextTurn);
+    if (turn - now > LOCATIONIQ_MAX_WAIT_MS) throw new HttpError(503, "Location lookups are busy; retry in a few seconds");
+    locationIqNextTurn = turn + LOCATIONIQ_SPACING_MS;
+    if (turn > now) await new Promise((resolve) => setTimeout(resolve, turn - now));
     try {
       return await axios.get(url, config);
     } catch (err) {
       const perSecondLimit = /rate limited second/i.test(String(err?.response?.data?.error || ""));
       if (!perSecondLimit || attempt >= LOCATIONIQ_RETRIES) throw err;
-      // Jittered so that calls refused together do not all come back together.
-      await new Promise((resolve) => setTimeout(resolve, 1_050 + Math.random() * 500));
     }
   }
+}
+
+// LocationIQ's search reads a trailing "City" or "Town" as a kind of place, not
+// as part of the name, and matches whatever is left: "Kansas City" comes back as
+// the state of Kansas, "Mexico City" as the country, "Jersey City" as Jersey
+// County, Illinois, "Daly City" as Daly in Australia, "Cape Town" as Cape Verde.
+// 49 of 60 such names tried on 2026-11-14 came back as something else, and its
+// structured city= search and source=v1n do the same. Its autocomplete endpoint
+// matches on the whole name, so when the search answer is not named what was
+// asked for:
+//   1. ask autocomplete for a city of exactly that name ("Kansas City");
+//   2. if there is none and the search answer was a whole county, state or
+//      country, ask for a city named without the suffix ("Quebec City" is
+//      "Quebec" on the map, "Luxembourg City" is "Luxembourg").
+// The name has to match exactly both times, so "New York City" and "Taipei City",
+// which the search already gets right, are left alone. Any error here, and any
+// name not ending in City or Town, keeps the search answer.
+const placeKey = (s) => String(s ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const LOCATIONIQ_BROAD_LEVELS = new Set(["county", "state", "country"]);
+
+async function cityNamed(query, wantedKey) {
+  try {
+    const { data } = await locationIqGet("https://api.locationiq.com/v1/autocomplete", {
+      timeout: UPSTREAM_TIMEOUT_MS,
+      params: { key: LOCATIONIQ_API_KEY, q: query, layers: "city", limit: 1, dedupe: 1 },
+    });
+    const hit = Array.isArray(data) ? data[0] : null;
+    if (!hit || placeKey(hit.display_place) !== wantedKey) return null;
+    return { lat: hit.lat, lon: hit.lon, display_name: [hit.display_place, hit.display_address].filter(Boolean).join(", ") };
+  } catch (err) {
+    // A 404 is the answer "no city of that name". Anything else means the
+    // question could not be asked, which is not grounds for trying a looser one.
+    return isGeocodeNoMatch(err) ? null : undefined;
+  }
+}
+
+async function cityInsteadOf(searchAnswer, address) {
+  const [head, ...qualifiers] = String(address).split(",");
+  const asked = placeKey(head);
+  const suffixed = asked.match(/^(.+) (city|town)$/);
+  if (!suffixed || placeKey(String(searchAnswer.display_name).split(",")[0]) === asked) return null;
+  const exact = await cityNamed(String(address), asked);
+  if (exact !== null || !LOCATIONIQ_BROAD_LEVELS.has(searchAnswer.matchquality?.matchlevel)) return exact || null;
+  return (await cityNamed([suffixed[1], ...qualifiers].join(","), suffixed[1])) || null;
 }
 
 async function geoLookupLogic({ address }) {
@@ -1378,10 +1432,11 @@ async function geoLookupLogic({ address }) {
   try {
     const { data } = await locationIqGet("https://us1.locationiq.com/v1/search", {
       timeout: UPSTREAM_TIMEOUT_MS,
-      params: { key: LOCATIONIQ_API_KEY, q: address, format: "json", limit: 1 },
+      // matchquality reports how broad a match was; cityInsteadOf reads it.
+      params: { key: LOCATIONIQ_API_KEY, q: address, format: "json", limit: 1, matchquality: 1 },
     });
     if (!data || data.length === 0) throw new HttpError(404, "No match found for that address");
-    const { lat, lon, display_name } = data[0];
+    const { lat, lon, display_name } = (await cityInsteadOf(data[0], address)) || data[0];
     const tzMatches = findTimezone(parseFloat(lat), parseFloat(lon));
     return { query: address, lat: parseFloat(lat), lng: parseFloat(lon), timezone: tzMatches[0] || null, display_name };
   } catch (err) {

@@ -182,12 +182,23 @@ redistribution restrictions. Lessons learned building this:
 - **Time zone names** come from `geo-tz/all`, not the package default. The default merges
   zones that have kept the same clock since 1970 and reports Oslo as `Europe/Berlin` and
   Bangkok as `Asia/Jakarta`.
-- **LocationIQ's per-second limit** — the free tier refuses a request that follows others
-  too closely with `{"error":"Rate Limited Second"}`. An agent asking about several places
-  at once triggers it, so every LocationIQ call goes through `locationIqGet`, which waits
-  about a second and retries, twice at most. The per-minute and per-day limits are not
-  retried. A place name resolved for `/weather/forecast` is LocationIQ (OpenStreetMap)
-  data, so that response carries the ODbL credit as well as MET Norway's.
+- **LocationIQ's per-second limit** — the free tier takes two requests a second and refuses
+  the next with `{"error":"Rate Limited Second"}`. An agent asking about several places at
+  once triggers it, so every LocationIQ call goes through `locationIqGet`, which starts
+  calls 600 ms apart and retries a refusal on a later turn. The per-minute and per-day
+  limits are not retried; a queue longer than 8 seconds is answered with an unbilled `503`.
+- **LocationIQ's search drops a trailing "City" or "Town"** — it reads the word as a kind
+  of place and matches the rest: "Kansas City" came back as the state of Kansas, "Mexico
+  City" as the country, "Jersey City" as Jersey County, Illinois, "Cape Town" as Cape
+  Verde (49 of 60 such names tried). Its structured `city=` search and `source=v1n` do the
+  same; its autocomplete endpoint does not. So when the search answer to such a name is
+  not named what was asked for, `geoLookupLogic` asks autocomplete (`layers=city`) for a
+  city of exactly that name, then, if the search answer was a whole county, state or
+  country, for one named without the suffix ("Quebec City" is "Quebec" on the map). This
+  serves `/geo/lookup` and place names in `/weather/forecast`. Autocomplete is documented
+  as a typeahead service, so it is only this fallback, never the first call.
+- A place name resolved for `/weather/forecast` is LocationIQ (OpenStreetMap) data, so
+  that response carries the ODbL credit as well as MET Norway's.
 - **EPA AirNow** — free with a key, but endpoints get retired: `/aq/observation/latLong/current/`
   was switched off on 2026-09-30 and has returned `410` since, so `/air/quality` (and the
   smoke reading in `/fire/risk`) failed on every call from 2026-10-01 until the move in
