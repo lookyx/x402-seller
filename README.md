@@ -192,11 +192,14 @@ redistribution restrictions. Lessons learned building this:
   City" as the country, "Jersey City" as Jersey County, Illinois, "Cape Town" as Cape
   Verde (49 of 60 such names tried). Its structured `city=` search and `source=v1n` do the
   same; its autocomplete endpoint does not. So when the search answer to such a name is
-  not named what was asked for, `geoLookupLogic` asks autocomplete (`layers=city`) for a
-  city of exactly that name, then, if the search answer was a whole county, state or
-  country, for one named without the suffix ("Quebec City" is "Quebec" on the map). This
-  serves `/geo/lookup` and place names in `/weather/forecast`. Autocomplete is documented
-  as a typeahead service, so it is only this fallback, never the first call.
+  not named what was asked for, `geoLookupLogic` asks autocomplete for a place of exactly
+  that name, then, if the search answer was a whole county, state or country, for a city
+  (`layers=city`) named without the suffix ("Quebec City" is "Quebec" on the map). A
+  suggestion is used only if it is a place rather than a business or airport, has exactly
+  the wanted name, and agrees with the text after the comma ("Panama City, Panama" is not
+  Panama City, Florida); otherwise the search answer stands. This serves `/geo/lookup` and
+  place names in `/weather/forecast`. Autocomplete is documented as a typeahead service,
+  so it is only this fallback, never the first call.
 - A place name resolved for `/weather/forecast` is LocationIQ (OpenStreetMap) data, so
   that response carries the ODbL credit as well as MET Norway's.
 - **EPA AirNow** — free with a key, but endpoints get retired: `/aq/observation/latLong/current/`

@@ -1391,27 +1391,43 @@ async function locationIqGet(url, config) {
 // structured city= search and source=v1n do the same. Its autocomplete endpoint
 // matches on the whole name, so when the search answer is not named what was
 // asked for:
-//   1. ask autocomplete for a city of exactly that name ("Kansas City");
+//   1. ask autocomplete for a place of exactly that name ("Kansas City");
 //   2. if there is none and the search answer was a whole county, state or
-//      country, ask for a city named without the suffix ("Quebec City" is
+//      country, ask it for a city named without the suffix ("Quebec City" is
 //      "Quebec" on the map, "Luxembourg City" is "Luxembourg").
-// The name has to match exactly both times, so "New York City" and "Taipei City",
-// which the search already gets right, are left alone. Any error here, and any
-// name not ending in City or Town, keeps the search answer.
+// A suggestion is used only if it is a place (not a shop or an airport that
+// starts with the same words), carries exactly the wanted name, and agrees with
+// whatever followed the comma: "Panama City, Panama" must not become Panama
+// City, Florida. So "New York City" and "Taipei City", which the search already
+// gets right, are left alone. Any error here, and any name not ending in City or
+// Town, keeps the search answer.
 const placeKey = (s) => String(s ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const LOCATIONIQ_BROAD_LEVELS = new Set(["county", "state", "country"]);
 
-async function cityNamed(query, wantedKey) {
+// Each qualifier ("Maryland", "South Africa") has to share a word with where the
+// suggestion says it is. Words under four letters ("KS", "USA") are too short to
+// compare with the spelled-out address and are left to autocomplete's ranking.
+function agreesWith(qualifiers, suggestion) {
+  const where = ` ${placeKey(`${suggestion.display_address} ${suggestion.address?.country}`)} `;
+  return qualifiers.every((qualifier) => {
+    const words = placeKey(qualifier).split(" ").filter((word) => word.length >= 4);
+    return words.length === 0 || words.some((word) => where.includes(` ${word} `));
+  });
+}
+
+// Returns the suggestion, null for "no such place", undefined if it could not ask.
+async function placeNamed(query, wantedKey, qualifiers, layers) {
   try {
     const { data } = await locationIqGet("https://api.locationiq.com/v1/autocomplete", {
       timeout: UPSTREAM_TIMEOUT_MS,
-      params: { key: LOCATIONIQ_API_KEY, q: query, layers: "city", limit: 1, dedupe: 1 },
+      params: { key: LOCATIONIQ_API_KEY, q: query, limit: 5, dedupe: 1, ...(layers ? { layers } : {}) },
     });
-    const hit = Array.isArray(data) ? data[0] : null;
-    if (!hit || placeKey(hit.display_place) !== wantedKey) return null;
+    const hit = (Array.isArray(data) ? data : []).find(
+      (suggestion) => suggestion.class === "place" && placeKey(suggestion.display_place) === wantedKey && agreesWith(qualifiers, suggestion));
+    if (!hit) return null;
     return { lat: hit.lat, lon: hit.lon, display_name: [hit.display_place, hit.display_address].filter(Boolean).join(", ") };
   } catch (err) {
-    // A 404 is the answer "no city of that name". Anything else means the
+    // A 404 is the answer "nothing by that name". Anything else means the
     // question could not be asked, which is not grounds for trying a looser one.
     return isGeocodeNoMatch(err) ? null : undefined;
   }
@@ -1422,9 +1438,9 @@ async function cityInsteadOf(searchAnswer, address) {
   const asked = placeKey(head);
   const suffixed = asked.match(/^(.+) (city|town)$/);
   if (!suffixed || placeKey(String(searchAnswer.display_name).split(",")[0]) === asked) return null;
-  const exact = await cityNamed(String(address), asked);
+  const exact = await placeNamed(String(address), asked, qualifiers);
   if (exact !== null || !LOCATIONIQ_BROAD_LEVELS.has(searchAnswer.matchquality?.matchlevel)) return exact || null;
-  return (await cityNamed([suffixed[1], ...qualifiers].join(","), suffixed[1])) || null;
+  return (await placeNamed([suffixed[1], ...qualifiers].join(","), suffixed[1], qualifiers, "city")) || null;
 }
 
 async function geoLookupLogic({ address }) {
