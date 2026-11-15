@@ -1353,10 +1353,30 @@ async function runHandler(res, fn) {
 // in production 2026-08-26 on /geo/lookup?address=0xd8dA...(an ETH address).
 const isGeocodeNoMatch = (err) => err?.response?.status === 404;
 
+// LocationIQ's free tier refuses a request that arrives too soon after others on
+// the same key with {error:"Rate Limited Second"}. An agent asking about several
+// places at once does exactly that: in testing on 2026-11-14, 5 of 14 lookups
+// sent back to back were refused, and each refusal reached the caller as a 502.
+// That limit clears by itself within a second, so wait it out, twice at most.
+// The per-minute and per-day limits do not clear that fast and are not retried.
+const LOCATIONIQ_RETRIES = 2;
+async function locationIqGet(url, config) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await axios.get(url, config);
+    } catch (err) {
+      const perSecondLimit = /rate limited second/i.test(String(err?.response?.data?.error || ""));
+      if (!perSecondLimit || attempt >= LOCATIONIQ_RETRIES) throw err;
+      // Jittered so that calls refused together do not all come back together.
+      await new Promise((resolve) => setTimeout(resolve, 1_050 + Math.random() * 500));
+    }
+  }
+}
+
 async function geoLookupLogic({ address }) {
   if (!address) throw new HttpError(400, "Missing required query param: address");
   try {
-    const { data } = await axios.get("https://us1.locationiq.com/v1/search", {
+    const { data } = await locationIqGet("https://us1.locationiq.com/v1/search", {
       timeout: UPSTREAM_TIMEOUT_MS,
       params: { key: LOCATIONIQ_API_KEY, q: address, format: "json", limit: 1 },
     });
@@ -1376,7 +1396,7 @@ app.get("/geo/lookup", (req, res) => runHandler(res, () => geoLookupLogic(req.qu
 async function geoReverseLogic({ lat, lng }) {
   if (!lat || !lng) throw new HttpError(400, "Missing required query params: lat, lng");
   try {
-    const { data } = await axios.get("https://us1.locationiq.com/v1/reverse", {
+    const { data } = await locationIqGet("https://us1.locationiq.com/v1/reverse", {
       timeout: UPSTREAM_TIMEOUT_MS,
       params: { key: LOCATIONIQ_API_KEY, lat, lon: lng, format: "json" },
     });
@@ -1712,8 +1732,10 @@ async function weatherForecastLogic({ place, lat, lng, units }) {
       alertsNote: us.alertsNote,
       units: unitSystem.labels,
       updatedAt: forecast?.properties?.meta?.updated_at || null,
-      attribution: "Forecast data from MET Norway (api.met.no), licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Text summaries, local times, unit conversions and daily values are derived from it by this service, which is not affiliated with or endorsed by MET Norway. U.S. alerts from the National Weather Service.",
-      source: "MET Norway Locationforecast 2.0; U.S. National Weather Service (alerts)",
+      // A place name and its coordinates come from LocationIQ, whose data is
+      // OpenStreetMap's, so that credit is owed whenever `place` was resolved.
+      attribution: `Forecast data from MET Norway (api.met.no), licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Text summaries, local times, unit conversions and daily values are derived from it by this service, which is not affiliated with or endorsed by MET Norway. U.S. alerts from the National Weather Service.${name ? " Place lookup by LocationIQ.com, data (c) OpenStreetMap contributors, ODbL 1.0." : ""}`,
+      source: `MET Norway Locationforecast 2.0; U.S. National Weather Service (alerts)${name ? "; LocationIQ (place lookup)" : ""}`,
     };
   } catch (err) {
     if (err instanceof HttpError) throw err;
@@ -2905,7 +2927,7 @@ async function routeHazardsLogic({ from, to, corridorKm }) {
     // geometries=geojson avoids decoding an encoded polyline; overview=simplified
     // keeps the point count small enough to correlate against without pagination.
     const url = `https://us1.locationiq.com/v1/directions/driving/${origin.lng},${origin.lat};${dest.lng},${dest.lat}`;
-    const { data } = await axios.get(url, {
+    const { data } = await locationIqGet(url, {
       params: { key: LOCATIONIQ_API_KEY, overview: "simplified", steps: "false", geometries: "geojson" },
       timeout: 15_000,
     });

@@ -182,6 +182,12 @@ redistribution restrictions. Lessons learned building this:
 - **Time zone names** come from `geo-tz/all`, not the package default. The default merges
   zones that have kept the same clock since 1970 and reports Oslo as `Europe/Berlin` and
   Bangkok as `Asia/Jakarta`.
+- **LocationIQ's per-second limit** — the free tier refuses a request that follows others
+  too closely with `{"error":"Rate Limited Second"}`. An agent asking about several places
+  at once triggers it, so every LocationIQ call goes through `locationIqGet`, which waits
+  about a second and retries, twice at most. The per-minute and per-day limits are not
+  retried. A place name resolved for `/weather/forecast` is LocationIQ (OpenStreetMap)
+  data, so that response carries the ODbL credit as well as MET Norway's.
 - **EPA AirNow** — free with a key, but endpoints get retired: `/aq/observation/latLong/current/`
   was switched off on 2026-09-30 and has returned `410` since, so `/air/quality` (and the
   smoke reading in `/fire/risk`) failed on every call from 2026-10-01 until the move in
