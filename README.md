@@ -157,13 +157,20 @@ redistribution restrictions. Lessons learned building this:
   redistribution outright in their ToS, since real-time exchange data is licensed
   separately from the API subscription. **EIA** (U.S. government) has no such
   restriction and covers oil, gas, and electricity pricing.
-- **EIA has bad minutes.** A sweep of every route on 2026-11-14 lost 4 of its 12 EIA
-  calls to the 12-second limit inside one minute; 86 EIA calls in the half hour after it
-  all answered in under 0.6 seconds. Within a bad minute some requests answer and others
-  hang, so `/oil/price`, `/gas/price`, `/electricity/price` and `/nuclear/outages` go
-  through `upstreamGet`: three tries of 4 seconds each instead of one of 12. It retries
-  only when there was no answer or a 5xx, never a 4xx. `/water/streamflow` uses it too
-  (two tries), for the brief USGS 503s seen before.
+- **EIA is slow to answer a query it has not served lately** — measured 2026-11-15 with
+  the production queries: electricity for Texas took 48.3 seconds and the identical
+  request straight after took 0.07; New York 62.6, then 0.07. A sweep of every route the
+  evening before lost 4 of its 12 EIA calls to the 12-second limit. Buyers of these
+  routes arrive days apart, so they are the ones who meet the slow start, and three
+  4-second tries in place of one 12-second wait rescued only 1 failing call in 4. So
+  `/oil/price`, `/gas/price`, `/electricity/price` and `/nuclear/outages` answer from
+  memory: the server fetches five queries on its own clock (prices every 30 minutes,
+  nuclear hourly, electricity for all states in one request every 6 hours), a buyer is
+  answered at once, and every answer carries `retrievedAt`. A copy older than 6 hours
+  (48 for the monthly electricity figures) is never served; then the buyer waits on EIA
+  for up to 12 seconds as before. An unknown state code is now a 404 in a millisecond.
+- **`/water/streamflow` retries** — `upstreamGet` tries twice (8 seconds each) when USGS
+  gives no answer or a 5xx, never on a 4xx; one brief USGS 503 used to fail the call.
 - **EIA v2 API quirks**: the `series_id` shorthand parameter (e.g. `PET.RWTC.D`) from
   the old v1 API is fully deprecated — current valid params are `frequency`, `data`,
   `facets`, `sort`, `offset`, `length`, `api_key`. Always verify a category's actual
