@@ -216,6 +216,29 @@ resourceServer
 // observed hang while leaving healthy calls (~0.5-2s) far below the ceiling.
 const UPSTREAM_TIMEOUT_MS = 12_000;
 
+// One upstream hiccup used to fail a whole paid call: a single transient USGS
+// 503 lost /water/streamflow in the 2026-07-25 regression run. upstreamGet gives
+// each try its own time limit and tries again when there was no answer at all
+// or the answer was a 5xx. A 4xx is an answer (bad input, not found) and is
+// never retried. For idempotent lookups only.
+const UPSTREAM_RETRY_PAUSE_MS = 300;
+async function upstreamGet(url, config, tryTimeoutsMs) {
+  let lastError;
+  for (const [attempt, timeout] of tryTimeoutsMs.entries()) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, UPSTREAM_RETRY_PAUSE_MS));
+    try {
+      return await axios.get(url, { ...config, timeout });
+    } catch (err) {
+      lastError = err;
+      const status = err?.response?.status;
+      if (status && status < 500) throw err;
+    }
+  }
+  throw lastError;
+}
+// USGS answers in about 0.4 s; its failures have been brief 503s (2026-07-25).
+const USGS_TRY_TIMEOUTS_MS = [8_000, 8_000];
+
 const PRICE_PER_LOOKUP = "$0.001";
 const PRICE_SEC_FILINGS_SEARCH = "$0.05";
 // Back to $0.005 on 2026-11-13 (owner decision). It was raised to $0.05 on
@@ -371,11 +394,11 @@ const PAYMENT_ROUTES = {
               required: [],
             },
             output: {
-              example: { commodity: "crude oil", benchmark: "WTI", price: 73.2, unit: "Dollars per Barrel", date: "2026-07-15", source: "U.S. Energy Information Administration (EIA)" },
+              example: { commodity: "crude oil", benchmark: "WTI", price: 73.2, unit: "Dollars per Barrel", date: "2026-07-15", retrievedAt: "2026-07-16T14:05:00.000Z", source: "U.S. Energy Information Administration (EIA)" },
               schema: {
                 properties: {
                   commodity: { type: "string" }, benchmark: { type: "string" }, price: { type: "number" },
-                  unit: { type: "string" }, date: { type: "string" }, source: { type: "string" },
+                  unit: { type: "string" }, date: { type: "string" }, retrievedAt: { type: "string" }, source: { type: "string" },
                 },
               },
             },
@@ -391,11 +414,11 @@ const PAYMENT_ROUTES = {
             input: {},
             inputSchema: { properties: {}, required: [] },
             output: {
-              example: { commodity: "natural gas", benchmark: "Henry Hub", price: 3.12, unit: "Dollars per Million Btu", date: "2026-07-15", source: "U.S. Energy Information Administration (EIA)" },
+              example: { commodity: "natural gas", benchmark: "Henry Hub", price: 3.12, unit: "Dollars per Million Btu", date: "2026-07-15", retrievedAt: "2026-07-16T14:05:00.000Z", source: "U.S. Energy Information Administration (EIA)" },
               schema: {
                 properties: {
                   commodity: { type: "string" }, benchmark: { type: "string" }, price: { type: "number" },
-                  unit: { type: "string" }, date: { type: "string" }, source: { type: "string" },
+                  unit: { type: "string" }, date: { type: "string" }, retrievedAt: { type: "string" }, source: { type: "string" },
                 },
               },
             },
@@ -414,11 +437,11 @@ const PAYMENT_ROUTES = {
               required: [],
             },
             output: {
-              example: { region: "U.S. Total", price: 12.5, unit: "cents per kilowatt-hour", date: "2026-04", source: "U.S. Energy Information Administration (EIA)" },
+              example: { region: "U.S. Total", price: 12.5, unit: "cents per kilowatt-hour", date: "2026-04", retrievedAt: "2026-07-16T12:00:00.000Z", source: "U.S. Energy Information Administration (EIA)" },
               schema: {
                 properties: {
                   region: { type: "string" }, price: { type: "number" },
-                  unit: { type: "string" }, date: { type: "string" }, source: { type: "string" },
+                  unit: { type: "string" }, date: { type: "string" }, retrievedAt: { type: "string" }, source: { type: "string" },
                 },
               },
             },
@@ -480,11 +503,11 @@ const PAYMENT_ROUTES = {
             input: {},
             inputSchema: { properties: {}, required: [] },
             output: {
-              example: { date: "2026-07-15", capacityMw: 96731, outageMw: 3200, percentOutage: 3.3, source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission" },
+              example: { date: "2026-07-15", capacityMw: 96731, outageMw: 3200, percentOutage: 3.3, retrievedAt: "2026-07-16T14:05:00.000Z", source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission" },
               schema: {
                 properties: {
                   date: { type: "string" }, capacityMw: { type: "number" },
-                  outageMw: { type: "number" }, percentOutage: { type: "number" }, source: { type: "string" },
+                  outageMw: { type: "number" }, percentOutage: { type: "number" }, retrievedAt: { type: "string" }, source: { type: "string" },
                 },
               },
             },
@@ -1495,27 +1518,110 @@ const eiaNum = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 
+// ---- EIA answers come from memory -------------------------------------------
+// EIA answers a query it has not served lately very slowly, then quickly for a
+// while. Measured 2026-11-15 with the production queries: electricity for Texas
+// took 48.3 s and the identical request straight after took 0.07 s; New York
+// 62.6 s, then 0.07 s. A sweep of every route the evening before lost 4 of its
+// 12 EIA calls to the 12 s limit, and three 4 s tries in place of one 12 s wait
+// rescued 1 failing call in 4 -- a retry cannot outrun a 45-second cold start.
+// Buyers of these routes arrive days apart, so they are the ones who meet it:
+// 12 s of waiting, then a 502 (earlier, unbounded, 15.4 s and 36.3 s reached
+// paying clients). The figures change once a day at most, monthly for
+// electricity, so the server asks EIA on its own clock, with the patience a
+// background job can afford, and a buyer is answered from memory at once. Each
+// answer says when it was fetched (`retrievedAt`). A buyer only waits on EIA
+// when memory holds nothing recent enough, for 12 s as before, and the request
+// carries on behind the error so that the next caller is served.
+const EIA_NEWEST_FIRST = { "sort[0][column]": "period", "sort[0][direction]": "desc" };
+const EIA_HOUR_MS = 3_600_000;
+const eiaDailyPrice = (path, series) => ({
+  path, params: { frequency: "daily", "data[0]": "value", "facets[series][]": series, ...EIA_NEWEST_FIRST, length: 1 },
+  freshMs: EIA_HOUR_MS / 2, maxAgeMs: 6 * EIA_HOUR_MS,
+});
+const EIA_QUERIES = {
+  oilWti: eiaDailyPrice("petroleum/pri/spt/data", "RWTC"),
+  oilBrent: eiaDailyPrice("petroleum/pri/spt/data", "RBRTE"),
+  gas: eiaDailyPrice("natural-gas/pri/fut/data", "RNGWHHD"),
+  nuclear: {
+    path: "nuclear-outages/us-nuclear-outages/data",
+    params: { frequency: "daily", "data[0]": "capacity", "data[1]": "outage", "data[2]": "percentOutage", ...EIA_NEWEST_FIRST, length: 1 },
+    freshMs: EIA_HOUR_MS, maxAgeMs: 6 * EIA_HOUR_MS,
+  },
+  // Every state in one request rather than one request per state: 62 state and
+  // region ids report each month, so 200 newest rows hold at least three months
+  // of each. Asking per state meant every state nobody had asked for lately was
+  // a cold query. Monthly figures, so four refreshes a day are plenty.
+  electricity: {
+    path: "electricity/retail-sales/data",
+    params: { frequency: "monthly", "data[0]": "price", "facets[sectorid][]": "ALL", ...EIA_NEWEST_FIRST, length: 200 },
+    freshMs: 6 * EIA_HOUR_MS, maxAgeMs: 48 * EIA_HOUR_MS,
+  },
+};
+const EIA_REFRESH_TIMEOUT_MS = 90_000;
+const eiaStore = new Map(); // query -> { rows, fetchedAt, pending }
+
+// One request per query at a time; whoever asks while it runs shares it.
+function eiaRefresh(query) {
+  let entry = eiaStore.get(query);
+  if (!entry) eiaStore.set(query, (entry = { rows: null, fetchedAt: 0, pending: null }));
+  if (!entry.pending) {
+    entry.pending = axios
+      .get(`https://api.eia.gov/v2/${query.path}`, { timeout: EIA_REFRESH_TIMEOUT_MS, params: { api_key: EIA_API_KEY, ...query.params } })
+      .then(({ data }) => {
+        const rows = data?.response?.data || [];
+        // An empty answer never replaces a good one; it counts as a failed refresh.
+        if (rows.length === 0) throw new Error("EIA returned no rows");
+        entry.rows = rows;
+        entry.fetchedAt = Date.now();
+      })
+      .finally(() => { entry.pending = null; });
+    // Only the status or message: an axios error also carries the URL, key included.
+    entry.pending.catch((err) => console.error(`[eia] ${query.path} refresh failed:`, err.response?.status || err.message));
+  }
+  return entry.pending;
+}
+
+async function eiaRows(query) {
+  const entry = eiaStore.get(query);
+  const age = entry?.rows ? Date.now() - entry.fetchedAt : Infinity;
+  if (age > query.freshMs) {
+    const refresh = eiaRefresh(query);
+    if (age > query.maxAgeMs) {
+      let timer;
+      const limit = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`EIA gave no answer within ${UPSTREAM_TIMEOUT_MS} ms`)), UPSTREAM_TIMEOUT_MS);
+      });
+      await Promise.race([refresh, limit]).finally(() => clearTimeout(timer));
+    }
+  }
+  const { rows, fetchedAt } = eiaStore.get(query);
+  return { rows, retrievedAt: new Date(fetchedAt).toISOString() };
+}
+
+function eiaKeepWarm() {
+  for (const query of Object.values(EIA_QUERIES)) {
+    const entry = eiaStore.get(query);
+    if (!entry?.rows || Date.now() - entry.fetchedAt > query.freshMs) eiaRefresh(query).catch(() => {});
+  }
+}
+eiaKeepWarm();
+setInterval(eiaKeepWarm, 5 * 60_000).unref();
+
 async function oilPriceLogic({ benchmark }) {
   const benchmarkParam = (benchmark || "wti").toLowerCase();
-  const seriesMap = { wti: { code: "RWTC", label: "WTI" }, brent: { code: "RBRTE", label: "Brent" } };
+  const seriesMap = { wti: { query: EIA_QUERIES.oilWti, label: "WTI" }, brent: { query: EIA_QUERIES.oilBrent, label: "Brent" } };
   const chosen = seriesMap[benchmarkParam];
   if (!chosen) throw new HttpError(400, "benchmark must be 'wti' or 'brent'");
   try {
-    const { data } = await axios.get("https://api.eia.gov/v2/petroleum/pri/spt/data", {
-      timeout: UPSTREAM_TIMEOUT_MS,
-      params: {
-        api_key: EIA_API_KEY, frequency: "daily", "data[0]": "value",
-        "facets[series][]": chosen.code, "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
-      },
-    });
-    const points = data?.response?.data || [];
+    const { rows: points, retrievedAt } = await eiaRows(chosen.query);
     if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
     // Same reasoning as /gas/price: "WTI"/"Brent" identify the benchmark but
     // never say crude oil. Fixed together rather than one at a time -- gotcha #24
     // exists because a previous fix covered 2 of 4 EIA routes and the other 2
     // stayed broken for weeks.
-    return { commodity: "crude oil", benchmark: chosen.label, price: eiaNum(latest.value), unit: latest.units || "Dollars per Barrel", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
+    return { commodity: "crude oil", benchmark: chosen.label, price: eiaNum(latest.value), unit: latest.units || "Dollars per Barrel", date: latest.period, retrievedAt, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
@@ -1526,14 +1632,7 @@ app.get("/oil/price", (req, res) => runHandler(res, () => oilPriceLogic(req.quer
 
 async function gasPriceLogic() {
   try {
-    const { data } = await axios.get("https://api.eia.gov/v2/natural-gas/pri/fut/data", {
-      timeout: UPSTREAM_TIMEOUT_MS,
-      params: {
-        api_key: EIA_API_KEY, frequency: "daily", "data[0]": "value",
-        "facets[series][]": "RNGWHHD", "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
-      },
-    });
-    const points = data?.response?.data || [];
+    const { rows: points, retrievedAt } = await eiaRows(EIA_QUERIES.gas);
     if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
     // "commodity" is explicit because the route name is not: in US usage "gas"
@@ -1541,7 +1640,7 @@ async function gasPriceLogic() {
     // and receive a wholesale natural gas figure with no way to detect the
     // mismatch. "Henry Hub" and "Dollars per Million Btu" only imply natural gas
     // to a reader who already knows the domain.
-    return { commodity: "natural gas", benchmark: "Henry Hub", price: eiaNum(latest.value), unit: latest.units || "Dollars per Million Btu", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
+    return { commodity: "natural gas", benchmark: "Henry Hub", price: eiaNum(latest.value), unit: latest.units || "Dollars per Million Btu", date: latest.period, retrievedAt, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
@@ -1563,18 +1662,12 @@ async function electricityPriceLogic(args) {
     throw new HttpError(400, "Invalid 'state' query param (expected a 2-letter US state code such as CA, or US for the national average)");
   }
   try {
-    const { data } = await axios.get("https://api.eia.gov/v2/electricity/retail-sales/data", {
-      timeout: UPSTREAM_TIMEOUT_MS,
-      params: {
-        api_key: EIA_API_KEY, frequency: "monthly", "data[0]": "price",
-        "facets[stateid][]": state, "facets[sectorid][]": "ALL",
-        "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
-      },
-    });
-    const points = data?.response?.data || [];
-    if (points.length === 0) throw new HttpError(404, `No data found for state '${state}'`);
-    const latest = points[0];
-    return { region: latest.stateDescription || state, price: eiaNum(latest.price), unit: "cents per kilowatt-hour", date: latest.period, source: "U.S. Energy Information Administration (EIA)" };
+    const { rows, retrievedAt } = await eiaRows(EIA_QUERIES.electricity);
+    // Rows are newest first across all states, so the first one for this state
+    // is its latest month.
+    const latest = rows.find((row) => row.stateid === state);
+    if (!latest) throw new HttpError(404, `No data found for state '${state}'`);
+    return { region: latest.stateDescription || state, price: eiaNum(latest.price), unit: "cents per kilowatt-hour", date: latest.period, retrievedAt, source: "U.S. Energy Information Administration (EIA)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
@@ -1818,20 +1911,12 @@ app.get("/weather/forecast", (req, res) => runHandler(res, () => weatherForecast
 
 async function nuclearOutagesLogic() {
   try {
-    const { data } = await axios.get("https://api.eia.gov/v2/nuclear-outages/us-nuclear-outages/data", {
-      timeout: UPSTREAM_TIMEOUT_MS,
-      params: {
-        api_key: EIA_API_KEY, frequency: "daily",
-        "data[0]": "capacity", "data[1]": "outage", "data[2]": "percentOutage",
-        "sort[0][column]": "period", "sort[0][direction]": "desc", length: 1,
-      },
-    });
-    const points = data?.response?.data || [];
+    const { rows: points, retrievedAt } = await eiaRows(EIA_QUERIES.nuclear);
     if (points.length === 0) throw new HttpError(502, "No data returned from EIA");
     const latest = points[0];
     return {
       date: latest.period, capacityMw: eiaNum(latest.capacity), outageMw: eiaNum(latest.outage),
-      percentOutage: eiaNum(latest.percentOutage), source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission",
+      percentOutage: eiaNum(latest.percentOutage), retrievedAt, source: "U.S. Energy Information Administration (EIA) / Nuclear Regulatory Commission",
     };
   } catch (err) {
     if (err instanceof HttpError) throw err;
@@ -2493,10 +2578,9 @@ app.get("/ocean/tides", (req, res) => runHandler(res, () => oceanTidesLogic(req.
 async function waterStreamflowLogic({ site }) {
   if (!site) throw new HttpError(400, "Missing required query param: site (USGS site number, e.g. 09380000)");
   try {
-    const { data } = await axios.get("https://waterservices.usgs.gov/nwis/iv/", {
-      timeout: UPSTREAM_TIMEOUT_MS,
+    const { data } = await upstreamGet("https://waterservices.usgs.gov/nwis/iv/", {
       params: { format: "json", sites: site, parameterCd: "00060,00065", siteStatus: "all" },
-    });
+    }, USGS_TRY_TIMEOUTS_MS);
     const seriesList = data?.value?.timeSeries || [];
     if (seriesList.length === 0) throw new HttpError(404, `No data found for USGS site '${site}'`);
     const result = {
@@ -3342,6 +3426,7 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+const MCP_PAYMENT_DESCRIPTION_MAX_BYTES = 450;
 let mcpTools = null;
 // Runs in the background — deliberately NOT awaited before app.listen() below.
 // paymentMiddleware() (see its call further up) already triggers this same
@@ -3379,9 +3464,20 @@ let mcpTools = null;
       // MCP discovery is instead handled correctly via the mcp.remoteConnector
       // field in /.well-known/x402 (a real https URL), which is what Agent402's
       // crawler actually reads.
+      // The payment requirement carries a description as well, and CDP's
+      // facilitator silently rejects verification when one runs past an
+      // undocumented length (gotcha #12: 459 bytes is known to work on an HTTP
+      // route, 566 to fail). With the price sentence added, four tool
+      // descriptions fall in between (465 to 511 bytes) and no paid call has
+      // shown which side they land on. So agents choosing a tool still read the
+      // full description, and one over the limit is replaced by the route's
+      // one-line summary in the payment requirement only.
+      const paymentDescription = Buffer.byteLength(description) <= MCP_PAYMENT_DESCRIPTION_MAX_BYTES
+        ? description
+        : `${ROUTE_META[path].summary}. Costs ${price} per call, paid via x402 (USDC on Base).`;
       const paid = createPaymentWrapper(resourceServer, {
         accepts: mcpAcceptsByPrice.get(price),
-        resource: { url: `mcp://tool/${name}`, description, mimeType: "application/json", serviceName: "Data Lookup API (x402-seller)" },
+        resource: { url: `mcp://tool/${name}`, description: paymentDescription, mimeType: "application/json", serviceName: "Data Lookup API (x402-seller)" },
       });
       const callback = paid(async (args) => {
         try {
