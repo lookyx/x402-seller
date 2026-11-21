@@ -315,7 +315,7 @@ const ROUTE_TAGS = {
   "/electricity/price": ["energy"],
   "/weather/forecast": ["weather", "forecast", "global", "alerts"],
   "/nuclear/outages": ["energy"],
-  "/earthquakes/recent": ["geology", "hazards"],
+  "/earthquakes/recent": ["geology", "hazards", "earthquakes"],
   "/currency/rate": ["finance"],
   "/air/quality": ["environment", "weather"],
   "/space/asteroids": ["space"],
@@ -516,25 +516,34 @@ const PAYMENT_ROUTES = {
       },
       "GET /earthquakes/recent": {
         accepts: [{ scheme: "exact", price: PRICE_PER_LOOKUP, network: NETWORK, payTo: PAY_TO }],
-        description: "Check for recent significant earthquakes, quakes, or seismic activity anywhere in the world, from the past 7 days, sourced from USGS (US Geological Survey). Answers questions like \"was there an earthquake near me\", \"how strong was the recent quake in X\", or \"list major earthquakes this week\". Optional 'minmagnitude' filters by minimum magnitude (default 4.5), and 'limit' caps the number of results (default 10, max 50).",
+        description: "Recent earthquakes in the past 7 days, worldwide or near a point, from the US Geological Survey (USGS). Answers \"was there an earthquake near me\" or \"list major earthquakes this week\". Pass lat and lng (optional radiusKm, default 250, max 2000) for quakes near a place, each with its distance and direction. minmagnitude defaults to 2.5 near a point, 4.5 worldwide; limit caps results (default 10, max 50).",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
-            input: { minmagnitude: "4.5", limit: "10" },
+            input: { lat: "37.7749", lng: "-122.4194", radiusKm: "250" },
             inputSchema: {
               properties: {
-                minmagnitude: { type: "string", description: "Minimum earthquake magnitude" },
-                limit: { type: "string", description: "Max number of results (max 50)" },
+                lat: { type: "string", description: "Latitude of the point to search around, -90 to 90 (use with lng; omit both for worldwide)" },
+                lng: { type: "string", description: "Longitude of the point to search around, -180 to 180 (use with lat)" },
+                radiusKm: { type: "string", description: "Search radius around lat/lng in km (default 250, max 2000)" },
+                minmagnitude: { type: "string", description: "Minimum earthquake magnitude (default 2.5 near a point, 4.5 worldwide)" },
+                limit: { type: "string", description: "Max number of results (default 10, max 50)" },
               },
               required: [],
             },
             output: {
+              // Shortened: a real answer lists up to `limit` quakes, newest first.
+              // Without lat/lng there is no `center` and no distance or direction.
               example: {
                 count: 1,
-                earthquakes: [{ place: "12 km ESE of Anza, CA", magnitude: 4.6, time: "2026-07-15T19:00:38.550Z", depthKm: 10.9, lat: 33.494, lng: -116.561, url: "https://earthquake.usgs.gov/earthquakes/eventpage/ci41439016" }],
+                center: { lat: 37.7749, lng: -122.4194, radiusKm: 250 },
+                earthquakes: [{
+                  place: "10 km NW of Pinnacles, CA", magnitude: 2.67, time: "2026-11-21T09:04:28.860Z", depthKm: 9.67,
+                  lat: 36.5935, lng: -121.2237, distanceKm: 168.8, direction: "SE", url: "https://earthquake.usgs.gov/earthquakes/eventpage/nc75469717",
+                }],
                 source: "U.S. Geological Survey (USGS)",
               },
-              schema: { properties: { count: { type: "number" }, earthquakes: { type: "array" }, source: { type: "string" } } },
+              schema: { properties: { count: { type: "number" }, center: { type: "object" }, earthquakes: { type: "array" }, source: { type: "string" } } },
             },
           }),
         },
@@ -1164,7 +1173,7 @@ app.get("/", (req, res) => {
       "GET /electricity/price?state=US",
       "GET /weather/forecast?place=Paris or lat=...&lng=... (worldwide; current, 24 h, 7 days; &units=imperial)",
       "GET /nuclear/outages",
-      "GET /earthquakes/recent?minmagnitude=4.5&limit=10",
+      "GET /earthquakes/recent?lat=...&lng=...&radiusKm=250 (near a point) or ?minmagnitude=4.5 (worldwide); &limit=10",
       "GET /currency/rate?from=USD&to=JPY",
       "GET /air/quality?lat=...&lng=... (US/CA/MX only)",
       "GET /space/asteroids?date=YYYY-MM-DD",
@@ -1208,7 +1217,7 @@ const ROUTE_META = {
   "/electricity/price": { operationId: "electricityPrice", summary: "Latest US retail electricity price", tags: ROUTE_TAGS["/electricity/price"] },
   "/weather/forecast": { operationId: "weatherForecast", summary: "Worldwide weather by place name or coordinates: current conditions, 24-hour and 7-day forecast", tags: ROUTE_TAGS["/weather/forecast"] },
   "/nuclear/outages": { operationId: "nuclearOutages", summary: "Daily US nuclear power plant outage data", tags: ROUTE_TAGS["/nuclear/outages"] },
-  "/earthquakes/recent": { operationId: "earthquakesRecent", summary: "Recent significant earthquakes worldwide", tags: ROUTE_TAGS["/earthquakes/recent"] },
+  "/earthquakes/recent": { operationId: "earthquakesRecent", summary: "Recent earthquakes worldwide or near a point", tags: ROUTE_TAGS["/earthquakes/recent"] },
   "/currency/rate": { operationId: "currencyRate", summary: "Official daily currency exchange rate", tags: ROUTE_TAGS["/currency/rate"] },
   "/air/quality": { operationId: "airQuality", summary: "Current US air quality index readings", tags: ROUTE_TAGS["/air/quality"] },
   "/space/asteroids": { operationId: "spaceAsteroids", summary: "Near-Earth asteroids by closest approach date", tags: ROUTE_TAGS["/space/asteroids"] },
@@ -1926,8 +1935,43 @@ async function nuclearOutagesLogic() {
 }
 app.get("/nuclear/outages", (req, res) => runHandler(res, () => nuclearOutagesLogic(req.query)));
 
+// Near a point or worldwide. The route's description has long promised answers
+// to "was there an earthquake near me", but it took no location and returned the
+// world's latest quakes. lat/lng and radiusKm go straight to USGS's own radius
+// search; each result then gets its distance and direction from the point.
+// Near a point the default threshold drops to M2.5, the level USGS's own feeds
+// treat as felt: at M4.5 most places would see an empty answer to a question
+// with a real one. Worldwide stays at M4.5, so callers without a location get
+// exactly the answer they got before.
+const QUAKE_DEFAULT_RADIUS_KM = 250;
+const QUAKE_MAX_RADIUS_KM = 2_000;
+
 async function earthquakesRecentLogic(args) {
-  const minmagnitude = args.minmagnitude || "4.5";
+  const hasLat = args.lat !== undefined && args.lat !== "";
+  const hasLng = args.lng !== undefined && args.lng !== "";
+  if (hasLat !== hasLng) throw new HttpError(400, "Provide both lat and lng to search near a point, or neither for worldwide");
+  const near = hasLat && hasLng;
+  let center = null;
+  if (near) {
+    const lat = Number(args.lat);
+    const lng = Number(args.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new HttpError(400, "lat and lng must be numbers");
+    if (lat < -90 || lat > 90) throw new HttpError(400, "lat must be between -90 and 90");
+    if (lng < -180 || lng > 180) throw new HttpError(400, "lng must be between -180 and 180");
+    let radiusKm = QUAKE_DEFAULT_RADIUS_KM;
+    if (args.radiusKm !== undefined && args.radiusKm !== "") {
+      radiusKm = Number(args.radiusKm);
+      if (!Number.isFinite(radiusKm)) throw new HttpError(400, "radiusKm must be a number of kilometres");
+      // Clamped rather than refused, as /route/hazards does with corridorKm; the
+      // radius actually used is echoed back in `center`.
+      radiusKm = Math.min(Math.max(radiusKm, 1), QUAKE_MAX_RADIUS_KM);
+    }
+    center = { lat, lng, radiusKm };
+  } else if (args.radiusKm !== undefined && args.radiusKm !== "") {
+    throw new HttpError(400, "radiusKm needs lat and lng");
+  }
+
+  const minmagnitude = args.minmagnitude || (near ? "2.5" : "4.5");
   // USGS returns HTTP 400 for a non-numeric minmagnitude, which axios throws and
   // the catch below would report as "Upstream USGS lookup failed" -- a 502 that
   // blames our infrastructure for the caller's bad parameter. Same mislabel class
@@ -1942,16 +1986,34 @@ async function earthquakesRecentLogic(args) {
   try {
     const { data } = await axios.get("https://earthquake.usgs.gov/fdsnws/event/1/query", {
       timeout: UPSTREAM_TIMEOUT_MS,
-      params: { format: "geojson", starttime: starttime.toISOString(), endtime: endtime.toISOString(), minmagnitude, orderby: "time", limit },
+      params: {
+        format: "geojson", starttime: starttime.toISOString(), endtime: endtime.toISOString(), minmagnitude, orderby: "time", limit,
+        ...(center ? { latitude: center.lat, longitude: center.lng, maxradiuskm: center.radiusKm } : {}),
+      },
     });
     const features = data?.features || [];
-    const earthquakes = features.map((f) => ({
-      place: f.properties?.place ?? null, magnitude: f.properties?.mag ?? null,
-      time: f.properties?.time ? new Date(f.properties.time).toISOString() : null,
-      depthKm: f.geometry?.coordinates?.[2] ?? null, lat: f.geometry?.coordinates?.[1] ?? null,
-      lng: f.geometry?.coordinates?.[0] ?? null, url: f.properties?.url ?? null,
-    }));
-    return { count: earthquakes.length, earthquakes, source: "U.S. Geological Survey (USGS)" };
+    const earthquakes = features.map((f) => {
+      const quake = {
+        place: f.properties?.place ?? null, magnitude: f.properties?.mag ?? null,
+        time: f.properties?.time ? new Date(f.properties.time).toISOString() : null,
+        depthKm: f.geometry?.coordinates?.[2] ?? null, lat: f.geometry?.coordinates?.[1] ?? null,
+        lng: f.geometry?.coordinates?.[0] ?? null, url: f.properties?.url ?? null,
+      };
+      if (center && typeof quake.lat === "number" && typeof quake.lng === "number") {
+        // Placed before `url` so the location fields read together.
+        const { url, ...rest } = quake;
+        return {
+          ...rest,
+          distanceKm: Math.round(haversineKm(center.lat, center.lng, quake.lat, quake.lng) * 10) / 10,
+          direction: bearingFrom(center.lat, center.lng, quake.lat, quake.lng),
+          url,
+        };
+      }
+      return quake;
+    });
+    return center
+      ? { count: earthquakes.length, center, earthquakes, source: "U.S. Geological Survey (USGS)" }
+      : { count: earthquakes.length, earthquakes, source: "U.S. Geological Survey (USGS)" };
   } catch (err) {
     if (err instanceof HttpError) throw err;
     console.error(err.response?.data || err.message);
