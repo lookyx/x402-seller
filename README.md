@@ -16,7 +16,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /electricity/price?state=US` | Latest US retail electricity price, national or by state (EIA) | $0.001 |
 | `GET /weather/forecast?place=...` or `?lat=...&lng=...` | Worldwide weather: current conditions, next 24 hours and 7-day outlook in local time, plus active alerts for US locations (MET Norway, NWS; `&units=imperial`) | $0.01 |
 | `GET /nuclear/outages` | Daily US nuclear plant outage data (NRC via EIA) | $0.001 |
-| `GET /earthquakes/recent?minmagnitude=...&limit=...` | Recent significant earthquakes worldwide (USGS) | $0.001 |
+| `GET /earthquakes/recent?lat=...&lng=...&radiusKm=...` or `?minmagnitude=...` | Earthquakes in the past 7 days near a point, with distance and direction, or worldwide (USGS) | $0.001 |
 | `GET /currency/rate?from=...&to=...` | Official daily FX rate between 30+ currencies (ECB) | $0.008 |
 | `GET /air/quality?lat=...&lng=...` | Current air quality index readings from the nearest monitors (EPA AirNow; US, Canada, Mexico) | $0.001 |
 | `GET /space/asteroids?date=...` | Near-Earth asteroids by closest approach date (NASA JPL) | $0.001 |
@@ -193,6 +193,13 @@ redistribution restrictions. Lessons learned building this:
   in-memory cache), attribution with the licence link and a note of what was derived,
   and nothing that presents the service as MET Norway's, Yr's or NRK's. The terms also
   ask that a human accept them when the calling code is AI-written.
+- **`/earthquakes/recent` near a point** passes `lat`/`lng`/`radiusKm` to USGS's own radius
+  search (`latitude`, `longitude`, `maxradiuskm`) and adds each quake's distance and compass
+  direction from the point. Near a point the default minimum magnitude is 2.5, the level
+  USGS's own feeds treat as felt; at 4.5 most places would get an empty answer. Worldwide
+  stays at 4.5, so a call without a location returns exactly what it did before. Outside
+  the US the USGS catalogue is only complete from about M4.5, so smaller quakes there
+  are mostly missing whatever the threshold.
 - **Time zone names** come from `geo-tz/all`, not the package default. The default merges
   zones that have kept the same clock since 1970 and reports Oslo as `Europe/Berlin` and
   Bangkok as `Asia/Jakarta`.

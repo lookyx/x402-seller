@@ -49,7 +49,7 @@ const ROUTES = [
   "/electricity/price?state=US",
   "/weather/forecast?lat=38.8894&lng=-77.0352",
   "/nuclear/outages",
-  "/earthquakes/recent?minmagnitude=4.5&limit=5",
+  "/earthquakes/recent?lat=37.7749&lng=-122.4194&radiusKm=250&limit=5",
   "/currency/rate?from=USD&to=JPY",
   // Los Angeles, not San Francisco: AirNow currently reports zero monitors near
   // SF at any radius (verified 0 readings at 25/50/100 miles), so the route
