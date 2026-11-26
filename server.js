@@ -1151,16 +1151,16 @@ const PAYMENT_ROUTES = {
               required: [],
             },
             output: {
-              // Real output for this input on 2026-11-25, not an illustration (same
+              // Real output for this input on 2026-11-26, not an illustration (same
               // reason as the verifiability-headers note: agents parse from the example).
               example: {
                 company: "Apple Inc.", ticker: "AAPL", cik: 320193, currency: "USD",
-                note: "A fourth quarter (q4Derived) is the full year minus the first nine months; its EPS is null because EPS cannot be derived that way.",
+                note: "A fourth quarter marked q4Derived is the full year minus the first nine months. Its EPS (epsDerived) is Q4 income over Q4 weighted-average shares derived the same way, rounded to the cent. Checked against 481 fiscal Q4s whose EPS the company filed: 74% matched to the cent, 97% within 4 cents. EPS is null where the filings don't fit together.",
                 yearOverYear: { periodEnd: "2026-09-26", comparedWith: "2025-09-27", revenueGrowthPct: 11.7, netIncomeGrowthPct: 11.8, netIncomeYearAgo: 27466000000 },
                 quarters: [
                   { fiscalYear: 2026, fiscalPeriod: "Q4", periodStart: "2026-06-28", periodEnd: "2026-09-26", reportedIn: "10-K", filed: "2026-11-03",
-                    revenue: 114477000000, grossProfit: 54820000000, operatingIncome: 35631000000, netIncome: 30711000000, epsDiluted: null,
-                    cash: 36305000000, longTermDebt: 68208000000, q4Derived: true },
+                    revenue: 114477000000, grossProfit: 54820000000, operatingIncome: 35631000000, netIncome: 30711000000, epsDiluted: 2.1,
+                    cash: 36305000000, longTermDebt: 68208000000, q4Derived: true, epsDerived: true },
                   { fiscalYear: 2026, fiscalPeriod: "Q3", periodStart: "2026-03-29", periodEnd: "2026-06-27", reportedIn: "10-Q", filed: "2026-07-31",
                     revenue: 109417000000, grossProfit: 54770000000, operatingIncome: 35695000000, netIncome: 29789000000, epsDiluted: 2.02,
                     cash: 39544000000, longTermDebt: 71340000000 },
@@ -1168,7 +1168,7 @@ const PAYMENT_ROUTES = {
                 concepts: {
                   revenue: "RevenueFromContractWithCustomerExcludingAssessedTax", grossProfit: "GrossProfit", operatingIncome: "OperatingIncomeLoss",
                   netIncome: "NetIncomeLoss", epsDiluted: "EarningsPerShareDiluted", cash: "CashAndCashEquivalentsAtCarryingValue",
-                  longTermDebt: "LongTermDebtNoncurrent",
+                  longTermDebt: "LongTermDebtNoncurrent", epsDerived: "NetIncomeLoss / WeightedAverageNumberOfDilutedSharesOutstanding",
                 },
                 source: "U.S. SEC EDGAR XBRL company facts (data.sec.gov), as filed in 10-Q and 10-K reports",
               },
@@ -3623,8 +3623,9 @@ app.get("/sentiment", (req, res) => runHandler(res, () => sentimentLogic(req.que
 //
 // Fourth quarters are not filed as quarters: the 10-K reports the full year. A Q4
 // figure here is the full year minus the first nine months (both from the 10-K and
-// the Q3 10-Q), marked q4Derived. EPS is not additive across quarters (share
-// counts change), so EPS is left null for a derived Q4 rather than estimated.
+// the Q3 10-Q), marked q4Derived. EPS can't be subtracted that way (share counts
+// change), so a Q4's EPS is worked out from its own income and share count and
+// marked epsDerived: see secDeriveQ4Eps.
 //
 // Companies tag the same line item differently (Apple's revenue is
 // RevenueFromContractWithCustomerExcludingAssessedTax, Boeing's Revenues). For
@@ -3747,6 +3748,133 @@ function secPickConcept(gaap, candidates, unit, reduce) {
   return best;
 }
 
+// Fiscal-Q4 EPS. Q4 income is the full year minus the nine months, like any other
+// Q4 figure. Q4's weighted-average share count comes from the same two periods: a
+// year-to-date count is the day-weighted average of its quarters' counts (for
+// diluted shares too, ASC 260-10-55-3), so Q4 count = (year count x year days -
+// nine-month count x nine-month days) / Q4 days, and Q4 EPS = Q4 income / Q4 count.
+// Rules that keep it from guessing:
+// - A loss quarter's diluted EPS is its basic EPS (dilution can't shrink a loss
+//   per share), so a Q4 loss uses basic income and basic shares.
+// - A profitable Q4 needs a profitable year and nine months: a year-to-date loss
+//   leaves potential shares out of the year-to-date count, which would skew Q4's.
+//   (52 such quarters in the test below; the basic count got 69% of them within a
+//   cent and the diluted count 59%, too few to publish.)
+// - The result must agree with full-year EPS minus nine-month EPS to within 4
+//   cents or 1%, whichever is larger. That difference is only roughly Q4's EPS
+//   (share counts move), but it shows whether the inputs fit together: Boeing's
+//   full-year 2024 share count doesn't square with its quarters after its Q4 share
+//   sale, and the derived figure was 16 cents off the announced -$5.46. A stock
+//   split between the Q3 10-Q and the 10-K fails it too. Where either EPS figure is
+//   missing, a Q4 share count more than 25% away from the year's average stays null.
+// - Only years whose other quarters have reported EPS are filled, so a company
+//   that stopped tagging diluted EPS doesn't get a lone Q4 figure.
+// Tested 2026-11-26 against companies whose 10-Ks also give their Q4 EPS: 637
+// fiscal Q4s (2022-2026) from 225 companies sampled from the SEC's CY2023Q4 and
+// CY2024Q4 EPS frames. It gave a figure for 481 of them: 74% matched the filed EPS
+// to the cent, 91% within a cent, 97% within 4 cents. In all 14 bigger misses the
+// company's own full-year minus nine-month EPS disagrees with its filed Q4 figure
+// too, so the filings themselves don't add up (Deckers' filed figure, for one,
+// predates its 6-for-1 split). On 21 well-known quarters checked against the EPS
+// announced (Apple, Microsoft, JPMorgan, Alphabet, Amazon, Meta, Nvidia, Ford,
+// Intel, Boeing, Rivian): 18 exact, the rest 1-4 cents off; Boeing's 2024 Q4,
+// Snap's 2024 Q4 and Intel's 2023 Q4 stay null as intended.
+// Income candidates in order; the year and nine months must come from one tag.
+// Ford tags the nine months only as income available to common (basic).
+const SEC_EPS_INCOME = {
+  diluted: ["NetIncomeLossAvailableToCommonStockholdersDiluted", "NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss"],
+  basic: ["NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss"],
+};
+const SEC_EPS_SHARES = {
+  diluted: "WeightedAverageNumberOfDilutedSharesOutstanding",
+  basic: "WeightedAverageNumberOfSharesOutstandingBasic",
+};
+const SEC_Q4_EPS_CHECK_CENTS = 0.04;
+const SEC_Q4_EPS_CHECK_SHARE = 0.01;
+const SEC_Q4_SHARE_DRIFT_MAX = 0.25;
+// Shown when any returned quarter is a derived Q4 or has derived EPS. The example
+// output in PAYMENT_ROUTES repeats it word for word.
+const SEC_Q4_NOTE = "A fourth quarter marked q4Derived is the full year minus the first nine months. "
+  + "Its EPS (epsDerived) is Q4 income over Q4 weighted-average shares derived the same way, rounded to the cent. "
+  + "Checked against 481 fiscal Q4s whose EPS the company filed: 74% matched to the cent, 97% within 4 cents. "
+  + "EPS is null where the filings don't fit together.";
+
+// Latest-filed fact of each duration period, keyed "start/end".
+function secPeriodFacts(facts) {
+  const byPeriod = new Map();
+  for (const f of facts || []) {
+    if (!f.start || !f.end || typeof f.val !== "number") continue;
+    const key = `${f.start}/${f.end}`;
+    const prev = byPeriod.get(key);
+    if (!prev || f.filed > prev.filed) byPeriod.set(key, f);
+  }
+  return byPeriod;
+}
+
+// Half a cent rounds away from zero, as companies round EPS.
+const secRoundCents = (n) => Math.sign(n) * Math.round(Math.abs(n) * 100) / 100;
+
+function secDeriveQ4Eps(gaap, figures) {
+  const eps = figures.flows.epsDiluted;
+  const factsOf = (concept, unit) => secPeriodFacts(gaap[concept]?.units?.[unit]);
+  const shares = { diluted: factsOf(SEC_EPS_SHARES.diluted, "shares"), basic: factsOf(SEC_EPS_SHARES.basic, "shares") };
+  const epsFacts = factsOf(figures.concepts.epsDiluted, "USD/shares");
+  const income = {};
+  for (const [kind, concepts] of Object.entries(SEC_EPS_INCOME)) {
+    income[kind] = concepts.map((concept) => ({ concept, byPeriod: factsOf(concept, "USD") }));
+  }
+  const years = new Map(); // "start/end" -> { start, end }
+  const nineEnds = new Map(); // start -> end of the nine months
+  for (const byPeriod of Object.values(shares)) {
+    for (const f of byPeriod.values()) {
+      const days = secDays(f.start, f.end);
+      if (days >= 350 && days <= 380) years.set(`${f.start}/${f.end}`, { start: f.start, end: f.end });
+      else if (days >= 260 && days <= 285) nineEnds.set(f.start, f.end);
+    }
+  }
+  for (const { start, end } of years.values()) {
+    const nineEnd = nineEnds.get(start);
+    if (!nineEnd || eps.has(end)) continue; // no nine months, or the company reported this Q4's EPS itself
+    if (![...eps.values()].some((q) => q.end > start && q.end <= nineEnd)) continue;
+    const yearKey = `${start}/${end}`;
+    const nineKey = `${start}/${nineEnd}`;
+    const incomeOf = (kind) => {
+      for (const { concept, byPeriod } of income[kind]) { // year and nine months from one concept
+        const y = byPeriod.get(yearKey);
+        const n = byPeriod.get(nineKey);
+        if (y && n) return { concept, year: y.val, nine: n.val, q4: y.val - n.val };
+      }
+      return null;
+    };
+    const diluted = incomeOf("diluted");
+    const basic = incomeOf("basic");
+    const kind = diluted && diluted.q4 > 0 && diluted.year > 0 && diluted.nine > 0 ? "diluted"
+      : basic && basic.q4 < 0 ? "basic" : null;
+    if (!kind) continue;
+    const yearShares = shares[kind].get(yearKey);
+    const nineShares = shares[kind].get(nineKey);
+    if (!yearShares || !nineShares) continue;
+    const yearDays = secDays(start, end) + 1;
+    const nineDays = secDays(start, nineEnd) + 1;
+    const q4Shares = (yearShares.val * yearDays - nineShares.val * nineDays) / (yearDays - nineDays);
+    if (!(q4Shares > 0)) continue;
+    const inc = kind === "diluted" ? diluted : basic;
+    const value = inc.q4 / q4Shares;
+    const yearEps = epsFacts.get(yearKey);
+    const nineEps = epsFacts.get(nineKey);
+    if (yearEps && nineEps) {
+      const tolerance = Math.max(SEC_Q4_EPS_CHECK_CENTS, SEC_Q4_EPS_CHECK_SHARE * Math.abs(value));
+      if (Math.abs(value - (yearEps.val - nineEps.val)) > tolerance) continue;
+    } else if (Math.abs(q4Shares / yearShares.val - 1) > SEC_Q4_SHARE_DRIFT_MAX) {
+      continue;
+    }
+    eps.set(end, {
+      start: new Date(Date.parse(nineEnd) + SEC_DAY_MS).toISOString().slice(0, 10), end,
+      val: secRoundCents(value), derived: true, from: `${inc.concept} / ${SEC_EPS_SHARES[kind]}`,
+    });
+  }
+}
+
 const secFactsCache = new Map(); // cik -> { value, fetchedAt } | { pending }
 async function secCompanyFigures(cik) {
   const hit = secFactsCache.get(cik);
@@ -3771,6 +3899,7 @@ async function secCompanyFigures(cik) {
       const best = secPickConcept(gaap, candidates, unit, (facts) => secQuarters(facts, { deriveQ4: field !== "epsDiluted" }));
       if (best) { figures.concepts[field] = best.concept; figures.flows[field] = best.periods; }
     }
+    if (figures.flows.epsDiluted) secDeriveQ4Eps(gaap, figures);
     for (const [field, candidates] of Object.entries(SEC_INSTANT_CONCEPTS)) {
       const best = secPickConcept(gaap, candidates, "USD", secInstants);
       if (best) { figures.concepts[field] = best.concept; figures.instants[field] = best.periods; }
@@ -3849,8 +3978,11 @@ async function secFinancialsLogic(args) {
       for (const field of Object.keys(SEC_DURATION_CONCEPTS)) row[field] = figures.flows[field]?.get(end)?.val ?? null;
       for (const field of Object.keys(SEC_INSTANT_CONCEPTS)) row[field] = figures.instants[field]?.get(end) ?? null;
       if (q.q4Derived) row.q4Derived = true;
+      if (figures.flows.epsDiluted?.get(end)?.derived) row.epsDerived = true;
       return row;
     });
+    const epsDerivedFrom = [...new Set(ends.map((end) => figures.flows.epsDiluted?.get(end))
+      .filter((q) => q?.derived).map((q) => q.from))];
     const latest = rows[0];
     const yearAgoEnd = [...spine.keys()].find((e) => Math.abs(secDays(e, latest.periodEnd) - 365) <= 15);
     const yearAgo = (field) => (yearAgoEnd ? figures.flows[field]?.get(yearAgoEnd)?.val ?? null : null);
@@ -3859,9 +3991,7 @@ async function secFinancialsLogic(args) {
       ticker: symbol,
       cik,
       currency: "USD",
-      ...(rows.some((r) => r.q4Derived) ? {
-        note: "A fourth quarter (q4Derived) is the full year minus the first nine months; its EPS is null because EPS cannot be derived that way.",
-      } : {}),
+      ...(rows.some((r) => r.q4Derived || r.epsDerived) ? { note: SEC_Q4_NOTE } : {}),
       yearOverYear: yearAgoEnd ? {
         periodEnd: latest.periodEnd,
         comparedWith: yearAgoEnd,
@@ -3870,7 +4000,7 @@ async function secFinancialsLogic(args) {
         netIncomeYearAgo: yearAgo("netIncome"),
       } : null,
       quarters: rows,
-      concepts: figures.concepts,
+      concepts: epsDerivedFrom.length ? { ...figures.concepts, epsDerived: epsDerivedFrom.join("; ") } : figures.concepts,
       source: "U.S. SEC EDGAR XBRL company facts (data.sec.gov), as filed in 10-Q and 10-K reports",
     };
     if (wantTone) body.tone = await secToneOrReason(cik);
