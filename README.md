@@ -328,8 +328,14 @@ What a company reported to the SEC, quarter by quarter, looked up by ticker. Add
   and the XBRL tag behind each figure. Companies tag the same item differently, so for each
   figure the candidate tag with the most recent data wins, and the answer names it.
 - **Fourth quarters** are not filed as quarters. Q4 = full year (10-K) minus the first nine
-  months (Q3 10-Q), marked `q4Derived`; EPS is left null for a derived Q4 because it is not
-  additive.
+  months (Q3 10-Q), marked `q4Derived`. EPS can't be subtracted, so a Q4's EPS (`epsDerived`)
+  is Q4 income divided by a Q4 weighted-average share count derived the same way (year count
+  x year days - nine-month count x nine-month days, over Q4 days). A Q4 loss uses basic income
+  and shares. It stays null for a profitable Q4 after a year-to-date loss, and when the result
+  is more than 4 cents or 1% away from the company's own full-year minus nine-month EPS (a
+  sign the filings don't fit together). Tested 2026-11-26 on 637 fiscal Q4s from 225
+  companies whose 10-Ks also give their Q4 EPS: it gave a figure for 481, of which 74% matched
+  to the cent, 91% within a cent and 97% within 4 cents. Added 2026-11-26.
 - **Not covered:** foreign companies that file 20-F under IFRS (404, not billed). Banks have no
   gross profit or operating income tags, and any figure a company does not tag comes back null.
 - **Cost to run:** one 4-8 MB JSON per company (300-550 KB over the wire, 0.2-0.5 s), reduced
