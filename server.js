@@ -43,7 +43,11 @@ if (!NASA_API_KEY) { console.error("\n❌ Missing NASA_API_KEY.\n"); process.exi
 if (!CENSUS_API_KEY) { console.error("\n❌ Missing CENSUS_API_KEY.\n"); process.exit(1); }
 
 const NWS_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
-const SEC_USER_AGENT = "x402-seller-starter/1.0 (contact: you@example.com)";
+// The SEC refuses requests whose User-Agent names no contact (HTTP 403 "Your
+// Request Originates from an Undeclared Automated Tool", seen 2026-11-25) and asks
+// for a real one: set SEC_USER_AGENT to "<app name> <your email>" in the
+// environment. The fallback is the placeholder this server has always sent.
+const SEC_USER_AGENT = process.env.SEC_USER_AGENT || "x402-seller-starter/1.0 (contact: you@example.com)";
 const BASE_RPC_URL = "https://mainnet.base.org";
 const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
@@ -299,6 +303,14 @@ const PRICE_ROUTE_HAZARDS = "$0.05";
 // on-chain amount identifies a sentiment sale, as with PRICE_OIL.
 // PLACEHOLDER PENDING OWNER DECISION -- no sales data yet.
 const PRICE_SENTIMENT = "$0.002";
+// /sec/financials: quarterly figures from SEC XBRL by ticker. $0.01 sits between
+// the two sellers of comparable SEC data with repeat buyers on 2026-11-25 (filing
+// text + XBRL at $0.005, company profile at $0.02) and under the $0.05 that this
+// seller's buyers pay at most. tone=true costs nothing extra: the model already
+// runs here. /weather/forecast is also $0.01, so attribute sales from the [PAY]
+// lines, not the on-chain amount.
+// PLACEHOLDER PENDING OWNER DECISION -- no sales data yet.
+const PRICE_SEC_FINANCIALS = "$0.01";
 
 // Bazaar service metadata (`serviceName` / `tags`), applied to every route below.
 // Over half the catalog publishes these and this seller published none, which
@@ -338,6 +350,7 @@ const ROUTE_TAGS = {
   "/payments/history": ["finance", "transparency"],
   "/census/demographics": ["geo", "government", "demographics"],
   "/sec/filings-search": ["finance", "government"],
+  "/sec/financials": ["finance", "sec", "fundamentals", "earnings", "sentiment"],
   "/space/weather": ["space", "weather", "risk"],
   "/route/hazards": ["geo", "routing", "fire", "weather", "risk"],
   "/sentiment": ["finance", "sentiment", "nlp", "crypto", "news"],
@@ -1116,6 +1129,57 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
+      // Description kept under the facilitator's undocumented limit (gotcha #12):
+      // 364 bytes here, 416 with the MCP price sentence (MCP cap 450).
+      "GET /sec/financials": {
+        accepts: [{ scheme: "exact", price: PRICE_SEC_FINANCIALS, network: NETWORK, payTo: PAY_TO }],
+        description: "Quarterly financials of a US-listed company by ticker or CIK, as filed with the SEC: revenue, gross profit, operating income, net income, diluted EPS, cash and long-term debt for up to 8 quarters, with year-over-year growth. Add tone=true for the tone of its latest earnings release: negative-line share, change since the last release, and the most negative lines.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { ticker: "AAPL", quarters: "2" },
+            inputSchema: {
+              properties: {
+                ticker: { type: "string", description: "US stock ticker, e.g. AAPL or BRK-B (or give cik instead)" },
+                cik: { type: "string", description: "SEC company id (CIK), instead of ticker" },
+                quarters: { type: "string", description: "Number of recent quarters, 1-8 (default 4)" },
+                tone: { type: "boolean", description: "true adds the tone of the latest earnings release, compared with the previous one" },
+              },
+              required: [],
+            },
+            output: {
+              // Real output for this input on 2026-11-25, not an illustration (same
+              // reason as the verifiability-headers note: agents parse from the example).
+              example: {
+                company: "Apple Inc.", ticker: "AAPL", cik: 320193, currency: "USD",
+                note: "A fourth quarter (q4Derived) is the full year minus the first nine months; its EPS is null because EPS cannot be derived that way.",
+                yearOverYear: { periodEnd: "2026-09-26", comparedWith: "2025-09-27", revenueGrowthPct: 11.7, netIncomeGrowthPct: 11.8, netIncomeYearAgo: 27466000000 },
+                quarters: [
+                  { fiscalYear: 2026, fiscalPeriod: "Q4", periodStart: "2026-06-28", periodEnd: "2026-09-26", reportedIn: "10-K", filed: "2026-11-03",
+                    revenue: 114477000000, grossProfit: 54820000000, operatingIncome: 35631000000, netIncome: 30711000000, epsDiluted: null,
+                    cash: 36305000000, longTermDebt: 68208000000, q4Derived: true },
+                  { fiscalYear: 2026, fiscalPeriod: "Q3", periodStart: "2026-03-29", periodEnd: "2026-06-27", reportedIn: "10-Q", filed: "2026-07-31",
+                    revenue: 109417000000, grossProfit: 54770000000, operatingIncome: 35695000000, netIncome: 29789000000, epsDiluted: 2.02,
+                    cash: 39544000000, longTermDebt: 71340000000 },
+                ],
+                concepts: {
+                  revenue: "RevenueFromContractWithCustomerExcludingAssessedTax", grossProfit: "GrossProfit", operatingIncome: "OperatingIncomeLoss",
+                  netIncome: "NetIncomeLoss", epsDiluted: "EarningsPerShareDiluted", cash: "CashAndCashEquivalentsAtCarryingValue",
+                  longTermDebt: "LongTermDebtNoncurrent",
+                },
+                source: "U.S. SEC EDGAR XBRL company facts (data.sec.gov), as filed in 10-Q and 10-K reports",
+              },
+              schema: {
+                properties: {
+                  company: { type: "string" }, ticker: { type: "string" }, cik: { type: "number" }, currency: { type: "string" },
+                  yearOverYear: { type: "object" }, quarters: { type: "array" }, concepts: { type: "object" },
+                  tone: { type: "object" }, source: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
       // Description kept well under the facilitator's undocumented limit
       // (gotcha #12): 281 bytes here, 334 with the MCP price sentence.
       "GET /sentiment": {
@@ -1234,6 +1298,7 @@ app.get("/", (req, res) => {
       "GET /payments/history?hours=24&address=0x... (this seller's own settlement history, max 72h)",
       "GET /census/demographics?zip=10001 (US Census ACS 5-Year population/income/age/housing by ZIP)",
       "GET /sec/filings-search?q=chip+shortage&forms=10-K (full-text search across all SEC EDGAR filings since 2001)",
+      "GET /sec/financials?ticker=AAPL&quarters=4 (quarterly revenue, profit, EPS, cash and debt as filed with the SEC; &tone=true adds the latest earnings release's tone)",
       "GET /sentiment?text=... (financial sentiment of a headline or post: negative, neutral or positive, with scores)",
     ],
     price_per_call: `${PRICE_RANGE} depending on the endpoint; see prices`,
@@ -1242,7 +1307,7 @@ app.get("/", (req, res) => {
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR. Sentiment model finbert-minilm-sentiment by Nagizaaz Shaik (MIT License), served from huggingface.co/looky/finbert-minilm-sentiment.",
+    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data and company financials from U.S. SEC EDGAR. Sentiment model finbert-minilm-sentiment by Nagizaaz Shaik (MIT License), served from huggingface.co/looky/finbert-minilm-sentiment.",
   });
 });
 
@@ -1277,6 +1342,7 @@ const ROUTE_META = {
   "/payments/history": { operationId: "paymentsHistory", summary: "This seller's own recent USDC settlement history on Base", tags: ROUTE_TAGS["/payments/history"] },
   "/census/demographics": { operationId: "censusDemographics", summary: "US Census ACS 5-Year demographics by ZIP code", tags: ROUTE_TAGS["/census/demographics"] },
   "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ROUTE_TAGS["/sec/filings-search"] },
+  "/sec/financials": { operationId: "secFinancials", summary: "Quarterly financials from a company's SEC filings by ticker, with optional earnings-release tone", tags: ROUTE_TAGS["/sec/financials"] },
   "/route/hazards": { operationId: "routeHazards", summary: "Driving route with active wildfires and weather alerts along it", tags: ROUTE_TAGS["/route/hazards"] },
   "/space/weather": { operationId: "spaceWeather", summary: "Current geomagnetic storm level, solar flare activity and NOAA space weather alerts", tags: ROUTE_TAGS["/space/weather"] },
   "/sentiment": { operationId: "financialSentiment", summary: "Financial sentiment (negative, neutral or positive) of a headline or short text", tags: ROUTE_TAGS["/sentiment"] },
@@ -1355,7 +1421,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: `${Object.keys(PAYMENT_ROUTES).length} pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, driving-route hazards, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, space weather, financial text sentiment, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers; sentiment comes from an MIT-licensed model run on this server.`,
+    summary: `${Object.keys(PAYMENT_ROUTES).length} pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, driving-route hazards, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, quarterly company financials from SEC filings, space weather, financial text sentiment, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers; sentiment comes from an MIT-licensed model run on this server.`,
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
@@ -1377,7 +1443,7 @@ function buildX402Manifest() {
       remoteNote: `Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs the same as its HTTP route (${PRICE_RANGE}, stated in the tool description) in USDC on Base, paid in-band via x402 (_meta["x402/payment"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.`,
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR. Sentiment model finbert-minilm-sentiment by Nagizaaz Shaik (MIT License), served from huggingface.co/looky/finbert-minilm-sentiment.",
+    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data and company financials from U.S. SEC EDGAR. Sentiment model finbert-minilm-sentiment by Nagizaaz Shaik (MIT License), served from huggingface.co/looky/finbert-minilm-sentiment.",
   };
 }
 
@@ -3539,6 +3605,459 @@ async function sentimentLogic({ text }) {
 }
 app.get("/sentiment", (req, res) => runHandler(res, () => sentimentLogic(req.query)));
 
+// ---- /sec/financials: quarterly figures from a company's own SEC filings ----
+// What a company reported in its 10-Qs and 10-Ks, from the SEC's XBRL "company
+// facts" (data.sec.gov; public domain, no key). The ticker only identifies the
+// company: SEC data has no share prices. Built 2026-11-25 after a review of what
+// sells in SEC data on x402: repeat buying goes to structured figures, not search
+// (one seller's filing-text-and-XBRL route took 2,566 calls from 9 payers in 30
+// days; full-text search drew mostly monitors). Search stays at its own route.
+//
+// One companyfacts file per company holds every concept it ever filed: 4-8 MB of
+// JSON (300-550 KB gzipped, 0.2-0.5 s from data.sec.gov; measured 2026-11-25 for
+// Apple, Microsoft, JPMorgan, GE). Only the few concepts used here are kept, as a
+// small object cached per CIK for SEC_FACTS_TTL_MS; the full file is dropped.
+//
+// Fourth quarters are not filed as quarters: the 10-K reports the full year. A Q4
+// figure here is the full year minus the first nine months (both from the 10-K and
+// the Q3 10-Q), marked q4Derived. EPS is not additive across quarters (share
+// counts change), so EPS is left null for a derived Q4 rather than estimated.
+//
+// Companies tag the same line item differently (Apple's revenue is
+// RevenueFromContractWithCustomerExcludingAssessedTax, Boeing's Revenues). For
+// each figure the candidate tag with the most recent data wins, and the answer
+// names the tag it used, so a buyer can check any number against the filing.
+const SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json";
+const SEC_TICKERS_TTL_MS = 24 * 3_600_000;
+const SEC_FACTS_TTL_MS = 6 * 3_600_000;
+const SEC_FACTS_CACHE_MAX = 200;
+const SEC_FINANCIALS_MAX_QUARTERS = 8;
+// data.sec.gov answers in 0.2-0.5 s; one retry covers a dropped connection or 5xx.
+const SEC_TRY_TIMEOUTS_MS = [8_000, 8_000];
+const SEC_DURATION_CONCEPTS = {
+  revenue: ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet",
+    "RevenueFromContractWithCustomerIncludingAssessedTax", "RevenuesNetOfInterestExpense"],
+  grossProfit: ["GrossProfit"],
+  operatingIncome: ["OperatingIncomeLoss"],
+  netIncome: ["NetIncomeLoss", "ProfitLoss"],
+  epsDiluted: ["EarningsPerShareDiluted"],
+};
+const SEC_INSTANT_CONCEPTS = {
+  cash: ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
+  longTermDebt: ["LongTermDebt", "LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations"],
+};
+const SEC_DAY_MS = 86_400_000;
+const secDays = (from, to) => Math.round((Date.parse(to) - Date.parse(from)) / SEC_DAY_MS);
+const secCik10 = (cik) => String(cik).padStart(10, "0");
+
+const secTickerCache = { byTicker: null, fetchedAt: 0, pending: null };
+async function secTickerMap() {
+  const c = secTickerCache;
+  if (c.byTicker && Date.now() - c.fetchedAt < SEC_TICKERS_TTL_MS) return c.byTicker;
+  if (!c.pending) {
+    c.pending = upstreamGet(SEC_TICKERS_URL, { headers: { "User-Agent": SEC_USER_AGENT } }, SEC_TRY_TIMEOUTS_MS)
+      .then(({ data }) => {
+        const byTicker = new Map();
+        for (const row of Object.values(data || {})) {
+          byTicker.set(String(row.ticker).toUpperCase(), { cik: Number(row.cik_str), name: String(row.title) });
+        }
+        // ~10,400 rows on 2026-11-25; a short list means a broken download, not fewer companies.
+        if (byTicker.size < 1_000) throw new Error(`SEC ticker list has only ${byTicker.size} rows`);
+        c.byTicker = byTicker;
+        c.fetchedAt = Date.now();
+        return byTicker;
+      })
+      .finally(() => { c.pending = null; });
+  }
+  try {
+    return await c.pending;
+  } catch (err) {
+    if (c.byTicker) return c.byTicker; // a day-old list beats no answer
+    throw err;
+  }
+}
+
+// Reduce one concept's facts to quarters: end date -> figure. Each period keeps
+// its latest-filed value (restatements win) but takes its fiscal labels from the
+// filing that first reported it, because later filings repeat a period as a
+// comparative under their own fiscal year and period.
+function secQuarters(facts, { deriveQ4 }) {
+  const periods = new Map();
+  for (const f of facts) {
+    if (!f.start || !f.end || typeof f.val !== "number") continue;
+    const key = `${f.start}/${f.end}`;
+    const p = periods.get(key) || { start: f.start, end: f.end, latest: f, first: f };
+    if (f.filed > p.latest.filed) p.latest = f;
+    if (f.filed < p.first.filed) p.first = f;
+    periods.set(key, p);
+  }
+  const quarters = new Map();
+  const years = [];
+  const nineMonths = new Map(); // start -> { end, val }
+  for (const p of periods.values()) {
+    const days = secDays(p.start, p.end);
+    if (days >= 80 && days <= 100) {
+      quarters.set(p.end, { start: p.start, end: p.end, val: p.latest.val, fy: p.first.fy, fp: p.first.fp,
+        form: p.first.form, filed: p.first.filed, q4Derived: false });
+    } else if (days >= 350 && days <= 380) {
+      years.push(p);
+    } else if (days >= 260 && days <= 285) {
+      nineMonths.set(p.start, { end: p.end, val: p.latest.val });
+    }
+  }
+  if (deriveQ4) {
+    for (const y of years) {
+      const nine = nineMonths.get(y.start);
+      if (!nine || quarters.has(y.end)) continue;
+      const start = new Date(Date.parse(nine.end) + SEC_DAY_MS).toISOString().slice(0, 10);
+      quarters.set(y.end, { start, end: y.end, val: y.latest.val - nine.val, fy: y.first.fy, fp: "Q4",
+        form: y.first.form, filed: y.first.filed, q4Derived: true });
+    }
+  }
+  return quarters;
+}
+
+function secInstants(facts) {
+  const byEnd = new Map();
+  for (const f of facts) {
+    if (f.start || !f.end || typeof f.val !== "number") continue;
+    const prev = byEnd.get(f.end);
+    if (!prev || f.filed > prev.filed) byEnd.set(f.end, f);
+  }
+  return new Map([...byEnd].map(([end, f]) => [end, f.val]));
+}
+
+// Of a figure's candidate tags, the one with the most recent period wins; most
+// periods breaks a tie (a company that switched tags keeps its old one's history).
+function secPickConcept(gaap, candidates, unit, reduce) {
+  let best = null;
+  for (const concept of candidates) {
+    const facts = gaap[concept]?.units?.[unit];
+    if (!facts?.length) continue;
+    const periods = reduce(facts);
+    if (!periods.size) continue;
+    const latest = [...periods.keys()].sort().at(-1);
+    if (!best || latest > best.latest || (latest === best.latest && periods.size > best.periods.size)) {
+      best = { concept, periods, latest };
+    }
+  }
+  return best;
+}
+
+const secFactsCache = new Map(); // cik -> { value, fetchedAt } | { pending }
+async function secCompanyFigures(cik) {
+  const hit = secFactsCache.get(cik);
+  if (hit?.value && Date.now() - hit.fetchedAt < SEC_FACTS_TTL_MS) return hit.value;
+  if (hit?.pending) return hit.pending;
+  const pending = (async () => {
+    let data;
+    try {
+      ({ data } = await upstreamGet(`https://data.sec.gov/api/xbrl/companyfacts/CIK${secCik10(cik)}.json`,
+        { headers: { "User-Agent": SEC_USER_AGENT } }, SEC_TRY_TIMEOUTS_MS));
+    } catch (err) {
+      if (err?.response?.status === 404) throw new HttpError(404, `The SEC has no XBRL financial data for CIK ${cik}`);
+      throw err;
+    }
+    const gaap = data?.facts?.["us-gaap"];
+    if (!gaap) {
+      throw new HttpError(404, `No US GAAP figures for CIK ${cik}: foreign companies filing Form 20-F report under IFRS, which this route does not read`);
+    }
+    const figures = { cik, name: data.entityName || null, concepts: {}, flows: {}, instants: {} };
+    for (const [field, candidates] of Object.entries(SEC_DURATION_CONCEPTS)) {
+      const unit = field === "epsDiluted" ? "USD/shares" : "USD";
+      const best = secPickConcept(gaap, candidates, unit, (facts) => secQuarters(facts, { deriveQ4: field !== "epsDiluted" }));
+      if (best) { figures.concepts[field] = best.concept; figures.flows[field] = best.periods; }
+    }
+    for (const [field, candidates] of Object.entries(SEC_INSTANT_CONCEPTS)) {
+      const best = secPickConcept(gaap, candidates, "USD", secInstants);
+      if (best) { figures.concepts[field] = best.concept; figures.instants[field] = best.periods; }
+    }
+    if (!figures.flows.revenue && !figures.flows.netIncome) {
+      throw new HttpError(404, `No quarterly revenue or net income in the SEC's XBRL data for CIK ${cik}`);
+    }
+    return figures;
+  })();
+  secFactsCache.set(cik, { pending });
+  try {
+    const value = await pending;
+    if (secFactsCache.size > SEC_FACTS_CACHE_MAX) secFactsCache.delete(secFactsCache.keys().next().value);
+    secFactsCache.set(cik, { value, fetchedAt: Date.now() });
+    return value;
+  } catch (err) {
+    secFactsCache.delete(cik);
+    throw err;
+  }
+}
+
+// "brk.b", "BRK/B" and "brk-b" all mean BRK-B, the form the SEC's list uses.
+function secNormalizeTicker(raw) {
+  const t = String(raw).trim().toUpperCase().replace(/[./]/g, "-");
+  return /^[A-Z0-9][A-Z0-9-]{0,9}$/.test(t) ? t : null;
+}
+
+function secParseFlag(raw, name) {
+  if (raw === undefined || raw === "") return false;
+  const v = String(raw).trim().toLowerCase();
+  if (["true", "1", "yes"].includes(v)) return true;
+  if (["false", "0", "no"].includes(v)) return false;
+  throw new HttpError(400, `${name} must be true or false`);
+}
+
+const secPct = (now, before) => (typeof now === "number" && typeof before === "number" && before > 0
+  ? Math.round((now / before - 1) * 1000) / 10 : null);
+
+async function secFinancialsLogic(args) {
+  const { ticker, cik: rawCik } = args;
+  if (Array.isArray(ticker) || Array.isArray(rawCik) || Array.isArray(args.quarters) || Array.isArray(args.tone)) {
+    throw new HttpError(400, "Give each parameter once");
+  }
+  if (!ticker && !rawCik) throw new HttpError(400, "Missing required query param: ticker (or cik)");
+  let quarters = SEC_FINANCIALS_MAX_QUARTERS / 2;
+  if (args.quarters !== undefined && args.quarters !== "") {
+    quarters = Number(args.quarters);
+    if (!Number.isInteger(quarters) || quarters < 1 || quarters > SEC_FINANCIALS_MAX_QUARTERS) {
+      throw new HttpError(400, `quarters must be a whole number from 1 to ${SEC_FINANCIALS_MAX_QUARTERS}`);
+    }
+  }
+  const wantTone = secParseFlag(args.tone, "tone");
+
+  let cik;
+  let symbol = null;
+  try {
+    if (rawCik) {
+      if (!/^\d{1,10}$/.test(String(rawCik).trim())) throw new HttpError(400, "cik must be the SEC's numeric company id, up to 10 digits");
+      cik = Number(String(rawCik).trim());
+    } else {
+      symbol = secNormalizeTicker(ticker);
+      if (!symbol) throw new HttpError(400, "ticker must be a stock symbol such as AAPL or BRK-B");
+      const entry = (await secTickerMap()).get(symbol);
+      if (!entry) throw new HttpError(404, `No company with ticker ${symbol} in the SEC's ticker list (US-listed companies only)`);
+      cik = entry.cik;
+    }
+    const figures = await secCompanyFigures(cik);
+    const spine = figures.flows.revenue || figures.flows.netIncome;
+    const ends = [...spine.keys()].sort().reverse().slice(0, quarters);
+    const rows = ends.map((end) => {
+      const q = spine.get(end);
+      const row = {
+        fiscalYear: q.fy, fiscalPeriod: q.fp, periodStart: q.start, periodEnd: end,
+        reportedIn: q.form, filed: q.filed,
+      };
+      for (const field of Object.keys(SEC_DURATION_CONCEPTS)) row[field] = figures.flows[field]?.get(end)?.val ?? null;
+      for (const field of Object.keys(SEC_INSTANT_CONCEPTS)) row[field] = figures.instants[field]?.get(end) ?? null;
+      if (q.q4Derived) row.q4Derived = true;
+      return row;
+    });
+    const latest = rows[0];
+    const yearAgoEnd = [...spine.keys()].find((e) => Math.abs(secDays(e, latest.periodEnd) - 365) <= 15);
+    const yearAgo = (field) => (yearAgoEnd ? figures.flows[field]?.get(yearAgoEnd)?.val ?? null : null);
+    const body = {
+      company: figures.name,
+      ticker: symbol,
+      cik,
+      currency: "USD",
+      ...(rows.some((r) => r.q4Derived) ? {
+        note: "A fourth quarter (q4Derived) is the full year minus the first nine months; its EPS is null because EPS cannot be derived that way.",
+      } : {}),
+      yearOverYear: yearAgoEnd ? {
+        periodEnd: latest.periodEnd,
+        comparedWith: yearAgoEnd,
+        revenueGrowthPct: secPct(latest.revenue, yearAgo("revenue")),
+        netIncomeGrowthPct: secPct(latest.netIncome, yearAgo("netIncome")),
+        netIncomeYearAgo: yearAgo("netIncome"),
+      } : null,
+      quarters: rows,
+      concepts: figures.concepts,
+      source: "U.S. SEC EDGAR XBRL company facts (data.sec.gov), as filed in 10-Q and 10-K reports",
+    };
+    if (wantTone) body.tone = await secToneOrReason(cik);
+    return body;
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error(err.response?.data || err.message);
+    throw new HttpError(502, "Upstream SEC lookup failed");
+  }
+}
+
+// ---- tone=true: the tone of the company's latest earnings release ----
+// Each narrative sentence of the release (8-K exhibit 99.1 filed under item 2.02;
+// tables, the forward-looking-statements section and "About" boilerplate removed)
+// is scored by the same model as /sentiment. Measured 2026-11-25 on 264 releases
+// from 17 companies (2023-2026), checked against each quarter's reported revenue
+// and profit: the share of negative lines tracks results (rank correlation -0.46
+// with revenue growth across all releases, -0.38 within each company over time),
+// but tone did not predict the next quarter beyond the current numbers, 44% of its
+// variation is just which company wrote it (Apple averages +46, Nike +9), and loss
+// quarters read no more negative than profitable ones. So it is shown against the
+// company's own previous release, with the most negative lines, and is never
+// presented as a forecast. Full test: project doc sec-route-review-2026-11-25.md.
+//
+// A release never changes, so each one is scored once and kept (by accession
+// number). Long releases are scored up to SEC_TONE_MAX_SENTENCES (90% of the 264
+// had 195 or fewer; one Tesla deck had 375): at ~9 ms a sentence on one core that
+// bounds a first-time answer to a few seconds, and the cap is stated in the reply.
+const SEC_TONE_MAX_SENTENCES = 150;
+const SEC_TONE_CACHE_MAX = 500;
+// Releases this short are usually delivery or pre-announcement notes (Tesla files
+// its quarterly deliveries under item 2.02 too), not the earnings release.
+const SEC_TONE_MIN_SENTENCES = 15;
+const SEC_TONE_MAX_RELEASES = 6;
+const SEC_RELEASE_LOOKBACK_DAYS = 400;
+const secToneCache = new Map(); // accession number -> Promise of a scored release
+
+const SEC_HTML_ENTITIES = { nbsp: " ", amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", rsquo: "’", lsquo: "‘",
+  rdquo: "”", ldquo: "“", mdash: "—", ndash: "–", hellip: "…", reg: "®", trade: "™", copy: "©", bull: "•" };
+function secDecodeEntities(s) {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === "#") {
+      const code = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(code) && code > 0 && code < 0x110000 ? String.fromCodePoint(code) : " ";
+    }
+    return SEC_HTML_ENTITIES[e.toLowerCase()] ?? m;
+  });
+}
+
+function secReleaseSentences(html) {
+  let s = String(html).replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, " ");
+  // Tables hold the financial statements. Innermost first, so nested tables go too.
+  for (let before = ""; before !== s;) {
+    before = s;
+    s = s.replace(/<table\b[^>]*>(?:(?!<table\b)[\s\S])*?<\/table>/gi, "\n");
+  }
+  s = s.replace(/<\/?(p|div|br|tr|li|h[1-6]|td|font)\b[^>]*>/gi, "\n").replace(/<[^>]+>/g, " ");
+  s = secDecodeEntities(s).replace(/ /g, " ");
+  // The narrative ends where the boilerplate starts.
+  const cuts = [
+    s.search(/\n[^\n]{0,40}(forward-looking statements|safe harbor)[^\n]{0,40}\n/i),
+    s.search(/\n\s*About [A-Z][^\n]{0,40}\n/),
+    s.search(/[^\n.]*forward-looking statements[^\n]*(Private Securities Litigation Reform Act|risks and uncertainties|within the meaning)/i),
+  ].filter((i) => i >= 0);
+  if (cuts.length) s = s.slice(0, Math.min(...cuts));
+  const sentences = [];
+  for (const line of s.split("\n")) {
+    const para = line.replace(/\s+/g, " ").trim();
+    if (!para) continue;
+    for (const raw of para.split(/(?<=[.!?])\s+(?=[A-Z"“(•])/)) {
+      const text = raw.replace(/^[\s•\-–]+|[\s•\-–]+$/g, "");
+      if ((text.match(/[A-Za-z]{2,}/g) || []).length >= 6 && text.length <= 1_000) sentences.push(text);
+    }
+  }
+  return sentences;
+}
+
+// The company's earnings releases from the last SEC_RELEASE_LOOKBACK_DAYS, newest
+// first, from EDGAR full-text search (the same index /sec/filings-search uses).
+async function secEarningsReleases(cik) {
+  const enddt = new Date().toISOString().slice(0, 10);
+  const startdt = new Date(Date.now() - SEC_RELEASE_LOOKBACK_DAYS * SEC_DAY_MS).toISOString().slice(0, 10);
+  // A full-text query needs a word; earnings releases all contain one of these.
+  for (const q of ["quarter", "results", "revenue"]) {
+    const { data } = await upstreamGet("https://efts.sec.gov/LATEST/search-index", {
+      headers: { "User-Agent": SEC_USER_AGENT },
+      params: { q, ciks: secCik10(cik), forms: "8-K", startdt, enddt },
+    }, SEC_TRY_TIMEOUTS_MS);
+    const byAccession = new Map();
+    for (const hit of data?.hits?.hits || []) {
+      const src = hit._source || {};
+      if (!/^EX-99(\.0?1)?$/i.test(String(src.file_type || "")) || !(src.items || []).includes("2.02")) continue;
+      const [accession, file] = String(hit._id).split(":");
+      if (!accession || !file || byAccession.has(accession)) continue;
+      byAccession.set(accession, {
+        accession, filed: src.file_date,
+        url: `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accession.replace(/-/g, "")}/${file}`,
+      });
+    }
+    if (byAccession.size) return [...byAccession.values()].sort((a, b) => (a.filed < b.filed ? 1 : -1));
+  }
+  return [];
+}
+
+function secScoreRelease(release) {
+  let pending = secToneCache.get(release.accession);
+  if (pending) return pending;
+  pending = (async () => {
+    const { data: html } = await upstreamGet(release.url,
+      { headers: { "User-Agent": SEC_USER_AGENT }, responseType: "text" }, SEC_TRY_TIMEOUTS_MS);
+    const sentences = secReleaseSentences(html);
+    let classify;
+    try {
+      classify = await sentimentModel;
+    } catch {
+      throw new HttpError(503, "Sentiment model unavailable");
+    }
+    const scored = [];
+    for (const text of sentences.slice(0, SEC_TONE_MAX_SENTENCES)) {
+      const results = await classify(text, { top_k: 3 });
+      const s = Object.fromEntries(results.map(({ label, score }) => [label, score]));
+      scored.push({ text, label: results[0].label, positive: s.positive, negative: s.negative });
+    }
+    const share = (label) => (scored.length
+      ? Math.round((1000 * scored.filter((x) => x.label === label).length) / scored.length) / 10 : null);
+    const top = (label) => scored.filter((x) => x.label === label).sort((a, b) => b[label] - a[label]).slice(0, 3)
+      .map((x) => ({ text: x.text.length > 300 ? `${x.text.slice(0, 297)}...` : x.text, score: round4(x[label]) }));
+    const positiveShare = share("positive");
+    const negativeShare = share("negative");
+    return {
+      filed: release.filed,
+      url: release.url,
+      sentencesScored: scored.length,
+      sentencesInRelease: sentences.length,
+      positiveShare,
+      neutralShare: share("neutral"),
+      negativeShare,
+      netTone: positiveShare === null ? null : Math.round(10 * (positiveShare - negativeShare)) / 10,
+      mostNegative: top("negative"),
+      mostPositive: top("positive"),
+    };
+  })();
+  secToneCache.set(release.accession, pending);
+  pending.catch(() => secToneCache.delete(release.accession));
+  if (secToneCache.size > SEC_TONE_CACHE_MAX) secToneCache.delete(secToneCache.keys().next().value);
+  return pending;
+}
+
+// Tone is an extra on top of the figures: if the release cannot be found or read,
+// the figures still come back and tone says why it is missing.
+async function secToneOrReason(cik) {
+  try {
+    const releases = await secEarningsReleases(cik);
+    if (!releases.length) {
+      return { available: false, reason: `No earnings release (8-K item 2.02, exhibit 99.1) in the last ${SEC_RELEASE_LOOKBACK_DAYS} days` };
+    }
+    // Newest release long enough to be an earnings release, then the one before it.
+    // At most SEC_TONE_MAX_RELEASES are read, which bounds a first-time answer.
+    const picked = [];
+    for (const release of releases.slice(0, SEC_TONE_MAX_RELEASES)) {
+      const scored = await secScoreRelease(release);
+      if (scored.sentencesInRelease >= SEC_TONE_MIN_SENTENCES) picked.push(scored);
+      if (picked.length === 2) break;
+    }
+    if (!picked.length) return { available: false, reason: "The recent item 2.02 filings are too short to score" };
+    const [latest, previous] = picked;
+    const { mostNegative, mostPositive, ...latestSummary } = latest;
+    return {
+      available: true,
+      latestRelease: latestSummary,
+      previousRelease: previous ? {
+        filed: previous.filed, url: previous.url, negativeShare: previous.negativeShare, netTone: previous.netTone,
+      } : null,
+      change: previous ? {
+        negativeShare: Math.round(10 * (latest.negativeShare - previous.negativeShare)) / 10,
+        netTone: Math.round(10 * (latest.netTone - previous.netTone)) / 10,
+      } : null,
+      mostNegative,
+      mostPositive,
+      method: "Each sentence of the earnings release (tables and legal boilerplate removed) scored by finbert-minilm-sentiment. Shares are percent of sentences; netTone = positive share minus negative share, in points.",
+      howToRead: "Companies write upbeat releases even in bad quarters and their styles differ a lot, so compare a company with its own previous release, not with other companies. Tone tracks the quarter's results; it is not a forecast.",
+    };
+  } catch (err) {
+    console.error(`[sec/financials] tone for CIK ${cik} failed:`, err.response?.status || "", err.message);
+    return { available: false, reason: err instanceof HttpError ? err.message : "The earnings release could not be read from EDGAR" };
+  }
+}
+
+app.get("/sec/financials", (req, res) => runHandler(res, () => secFinancialsLogic(req.query)));
+
 // ---- MCP endpoint (POST /mcp) — the same 18 tools, payable in-band via x402 ----
 // Stateless Streamable HTTP: initialize and tools/list are free; each tools/call is
 // wrapped by @x402/mcp — unpaid calls get the payment requirements as a structured
@@ -3566,6 +4085,7 @@ const MCP_TOOL_DEFS = [
   { path: "/fire/risk", logic: fireRiskLogic },
   { path: "/payments/history", logic: paymentHistoryLogic },
   { path: "/sec/filings-search", logic: secFilingsSearchLogic },
+  { path: "/sec/financials", logic: secFinancialsLogic },
   { path: "/census/demographics", logic: censusDemographicsLogic },
   { path: "/sentiment", logic: sentimentLogic },
 ];
@@ -3589,9 +4109,13 @@ function zodShapeFor(path) {
   const required = qp.required || [];
   const shape = {};
   for (const [name, schema] of Object.entries(qp.properties || {})) {
+    // A boolean flag (tone on /sec/financials) also takes a JSON true/false from
+    // MCP callers, passed on as the "true"/"false" string an HTTP query would carry.
     let s = schema.enum
       ? z.preprocess((v) => (typeof v === "string" ? v.toLowerCase() : v), z.enum(schema.enum))
-      : z.union([z.string(), z.number()]).transform((v) => String(v));
+      : schema.type === "boolean"
+        ? z.union([z.boolean(), z.string(), z.number()]).transform((v) => String(v))
+        : z.union([z.string(), z.number()]).transform((v) => String(v));
     if (schema.description) s = s.describe(schema.description);
     if (!required.includes(name)) s = s.optional();
     shape[name] = s;

@@ -31,6 +31,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /payments/history?hours=24&address=...` | This seller's own recent USDC settlement history on Base (self-referential, max 72h window) | $0.001 |
 | `GET /census/demographics?zip=...` | US Census ACS 5-Year population, median income, median age, and housing units by ZIP code (Census Bureau) | $0.001 |
 | `GET /sec/filings-search?q=...&forms=10-K` | Full-text search across all SEC EDGAR filings since 2001, by keyword/company/topic (SEC EDGAR) | $0.05 |
+| `GET /sec/financials?ticker=...&quarters=4` | Quarterly revenue, gross profit, operating income, net income, diluted EPS, cash and long-term debt as filed in 10-Qs and 10-Ks, with year-over-year growth; `&tone=true` adds the tone of the latest earnings release (SEC EDGAR XBRL; see "The /sec/financials route") | $0.01 |
 | `GET /sentiment?text=...` | Financial sentiment of a headline, tweet or market post: negative, neutral or positive, with all three scores. English, up to 1,000 characters (model run on this server; see "The /sentiment model") | $0.002 |
 
 Every endpoint is also an MCP tool at `POST /mcp`, at the same price as its HTTP route.
@@ -64,6 +65,7 @@ Required environment variables (see `.env.example`):
 - `LOCATIONIQ_API_KEY` — free at locationiq.com (5,000 req/day free tier, licensed for commercial resale)
 - `EIA_API_KEY` — free at eia.gov/opendata/register.php (no rate limit stated; official US government data)
 - `CENSUS_API_KEY` — free at api.census.gov/data/key_signup.html (mandatory on every call since a May 2026 policy change; official US government data)
+- `SEC_USER_AGENT` — optional but recommended: `<app name> <your email>`. The SEC refuses requests whose User-Agent names no contact; without this the server sends a placeholder address
 - `NETWORK` / `FACILITATOR_URL` — testnet by default; see "Mainnet" below
 - `CDP_API_KEY_ID` / `CDP_API_KEY_SECRET` — only needed for mainnet (see below)
 
@@ -262,6 +264,8 @@ redistribution restrictions. Lessons learned building this:
   live testing, not assumed from docs. Single-ZCTA queries for the 2020+ vintage must
   omit the `in=state:XX` qualifier entirely (adding it causes a 400 "unsupported
   geography hierarchy" — the opposite of what older/pre-2020 vintages required).
+- **SEC XBRL company facts (`data.sec.gov`)** and the SEC ticker list — public domain,
+  no key; same User-Agent rule as below. Used by `/sec/financials`.
 - **SEC EDGAR Full-Text Search (`efts.sec.gov`)** — public domain, no key, but a
   blank/invalid query returns `HTTP 200` with an `error`/`errorMessage` field in the
   body instead of a 4xx — axios never throws, the handler must inspect the body (same
@@ -310,6 +314,41 @@ redistribution restrictions. Lessons learned building this:
   carries over to a trained model is legally unsettled. Many financial sentiment models
   share this, since PhraseBank is the standard training set. The most downloaded one,
   ProsusAI/finbert, is licensed non-commercial outright, which is why it was not used.
+
+## The /sec/financials route
+
+What a company reported to the SEC, quarter by quarter, looked up by ticker. Added 2026-11-25.
+
+- **Source:** the SEC's XBRL "company facts" (`data.sec.gov/api/xbrl/companyfacts/CIK##########.json`),
+  public domain, no key. Tickers are looked up in the SEC's own list
+  (`www.sec.gov/files/company_tickers.json`, about 10,400 symbols, cached for a day). SEC data
+  has no share prices: the ticker only picks the company.
+- **What comes back:** up to 8 recent quarters of revenue, gross profit, operating income, net
+  income, diluted EPS, cash and long-term debt; year-over-year growth for the latest quarter;
+  and the XBRL tag behind each figure. Companies tag the same item differently, so for each
+  figure the candidate tag with the most recent data wins, and the answer names it.
+- **Fourth quarters** are not filed as quarters. Q4 = full year (10-K) minus the first nine
+  months (Q3 10-Q), marked `q4Derived`; EPS is left null for a derived Q4 because it is not
+  additive.
+- **Not covered:** foreign companies that file 20-F under IFRS (404, not billed). Banks have no
+  gross profit or operating income tags, and any figure a company does not tag comes back null.
+- **Cost to run:** one 4-8 MB JSON per company (300-550 KB over the wire, 0.2-0.5 s), reduced
+  to a few KB and cached 6 hours per company, 200 companies at most.
+- **`tone=true`:** finds the company's latest earnings release (8-K exhibit 99.1 under item
+  2.02) through EDGAR full-text search, strips tables and legal boilerplate, and scores up to
+  150 sentences with the /sentiment model. The release before it is scored the same way, for
+  the change. Each release is scored once and cached by accession number: about 1.5-4 s for a
+  first call in testing, under 0.5 s after. If the release cannot be found or read, the
+  figures still come back, with `tone.available: false` and the reason.
+- **How far to trust the tone** (tested 2026-11-25 on 264 releases from 17 companies,
+  2023-2026, against each quarter's reported revenue and profit): the share of negative lines
+  tracks results (rank correlation -0.46 with revenue growth across releases, -0.38 within each
+  company over time), and a strong-growth release read more upbeat than a falling-revenue one
+  71% of the time. But tone did not predict the next quarter beyond the current numbers, 44% of
+  its variation is just which company wrote it (Apple averages +46 net tone, Nike +9), and loss
+  quarters read no more negative than profitable ones. So the answer compares a release with
+  the company's previous one and is never presented as a forecast.
+- **Price:** $0.01 with or without tone (`PRICE_SEC_FINANCIALS`).
 
 ## Extending this
 
