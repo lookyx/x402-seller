@@ -20,6 +20,9 @@ import { createPaymentWrapper } from "@x402/mcp";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
+// Constants only. Transformers.js itself is imported lazily where the model is
+// loaded, so a problem with it can only take down /sentiment, never boot.
+import { MODELS_DIR, SENTIMENT_MODEL_ID, SENTIMENT_MODEL_REVISION } from "./sentiment-model.js";
 
 const PORT = process.env.PORT || 4021;
 const PAY_TO = process.env.PAY_TO_ADDRESS;
@@ -289,6 +292,13 @@ const PRICE_SPACE_WEATHER = "$0.05";
 // /fire/risk and /space/weather are in. Set deliberately mid-catalog (median
 // $0.014, p75 $0.05) rather than assuming the premium tier.
 const PRICE_ROUTE_HAZARDS = "$0.05";
+// /sentiment runs a local model: no upstream API and no per-call cost beyond a
+// few milliseconds of CPU. An agent with its own LLM can judge sentiment
+// itself, so this sits at the cheap end, above the facilitator floor (see
+// "Price floor" in the README). $0.002 is used by no other route, so the
+// on-chain amount identifies a sentiment sale, as with PRICE_OIL.
+// PLACEHOLDER PENDING OWNER DECISION -- no sales data yet.
+const PRICE_SENTIMENT = "$0.002";
 
 // Bazaar service metadata (`serviceName` / `tags`), applied to every route below.
 // Over half the catalog publishes these and this seller published none, which
@@ -330,6 +340,7 @@ const ROUTE_TAGS = {
   "/sec/filings-search": ["finance", "government"],
   "/space/weather": ["space", "weather", "risk"],
   "/route/hazards": ["geo", "routing", "fire", "weather", "risk"],
+  "/sentiment": ["finance", "sentiment", "nlp", "crypto", "news"],
 };
 
 const PAYMENT_ROUTES = {
@@ -1105,6 +1116,41 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
+      // Description kept well under the facilitator's undocumented limit
+      // (gotcha #12): 281 bytes here, 334 with the MCP price sentence.
+      "GET /sentiment": {
+        accepts: [{ scheme: "exact", price: PRICE_SENTIMENT, network: NETWORK, payTo: PAY_TO }],
+        description: "Sentiment of a short English financial text such as a news headline, tweet or market post: negative, neutral or positive, with all three probabilities. Tuned for finance and crypto. Runs a compact model on this server, so answers take milliseconds. Up to 1,000 characters per call.",
+        mimeType: "application/json",
+        extensions: {
+          ...declareDiscoveryExtension({
+            input: { text: "Bitcoin surges past $100k as ETF inflows hit a record high" },
+            inputSchema: {
+              properties: {
+                text: { type: "string", description: "English text to score, up to 1,000 characters (a headline, post or short paragraph)" },
+              },
+              required: ["text"],
+            },
+            output: {
+              // Real output for this input, not an illustration (same reason as
+              // the verifiability-headers note: agents parse from the example).
+              example: {
+                text: "Bitcoin surges past $100k as ETF inflows hit a record high",
+                label: "positive",
+                scores: { positive: 0.6811, neutral: 0.1692, negative: 0.1497 },
+                model: "looky/finbert-minilm-sentiment",
+                modelRevision: "32cb91e",
+              },
+              schema: {
+                properties: {
+                  text: { type: "string" }, label: { type: "string" },
+                  scores: { type: "object" }, model: { type: "string" }, modelRevision: { type: "string" },
+                },
+              },
+            },
+          }),
+        },
+      },
 };
 
 // Attach the Bazaar service metadata to every paid route. Derived rather than
@@ -1188,6 +1234,7 @@ app.get("/", (req, res) => {
       "GET /payments/history?hours=24&address=0x... (this seller's own settlement history, max 72h)",
       "GET /census/demographics?zip=10001 (US Census ACS 5-Year population/income/age/housing by ZIP)",
       "GET /sec/filings-search?q=chip+shortage&forms=10-K (full-text search across all SEC EDGAR filings since 2001)",
+      "GET /sentiment?text=... (financial sentiment of a headline or post: negative, neutral or positive, with scores)",
     ],
     price_per_call: `${PRICE_RANGE} depending on the endpoint; see prices`,
     prices: ROUTE_PRICES,
@@ -1195,7 +1242,7 @@ app.get("/", (req, res) => {
     network: NETWORK,
     machine_readable: { openapi: "/openapi.json", x402_manifest: "/.well-known/x402", mcp: "POST /mcp (Streamable HTTP, stateless)" },
     facilitator: USING_CDP ? "CDP (authenticated)" : FACILITATOR_URL,
-    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR. Sentiment model finbert-minilm-sentiment by Nagizaaz Shaik (MIT License), served from huggingface.co/looky/finbert-minilm-sentiment.",
   });
 });
 
@@ -1232,6 +1279,7 @@ const ROUTE_META = {
   "/sec/filings-search": { operationId: "secFilingsSearch", summary: "Full-text search across all SEC EDGAR filings since 2001", tags: ROUTE_TAGS["/sec/filings-search"] },
   "/route/hazards": { operationId: "routeHazards", summary: "Driving route with active wildfires and weather alerts along it", tags: ROUTE_TAGS["/route/hazards"] },
   "/space/weather": { operationId: "spaceWeather", summary: "Current geomagnetic storm level, solar flare activity and NOAA space weather alerts", tags: ROUTE_TAGS["/space/weather"] },
+  "/sentiment": { operationId: "financialSentiment", summary: "Financial sentiment (negative, neutral or positive) of a headline or short text", tags: ROUTE_TAGS["/sentiment"] },
 };
 
 function routeEntries() {
@@ -1307,7 +1355,7 @@ function buildX402Manifest() {
     spec: "agent402-service-manifest/1",
     version: 1,
     name: "Data Lookup API (x402-seller)",
-    summary: `${Object.keys(PAYMENT_ROUTES).length} pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, driving-route hazards, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, space weather, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers.`,
+    summary: `${Object.keys(PAYMENT_ROUTES).length} pay-per-call data endpoints for AI agents: geocoding, energy prices, weather, tides, streamflow, river flood risk, wildfire risk, driving-route hazards, earthquakes, air quality, FX rates, US treasury debt, asteroids, on-chain balances, US Census demographics, SEC EDGAR filing search, space weather, financial text sentiment, and this seller's own settlement history. Sourced from licensed, public-domain, and on-chain providers; sentiment comes from an MIT-licensed model run on this server.`,
     homepage: BASE_URL,
     repository: "https://github.com/lookyx/x402-seller",
     resources: routeEntries().map(({ path }) => `${BASE_URL}${path}`),
@@ -1329,7 +1377,7 @@ function buildX402Manifest() {
       remoteNote: `Streamable HTTP, stateless, no auth to connect — initialize and tools/list are free; each tool call costs the same as its HTTP route (${PRICE_RANGE}, stated in the tool description) in USDC on Base, paid in-band via x402 (_meta["x402/payment"]). x402-aware MCP clients pay automatically; other clients receive the payment requirements as a structured tool result.`,
     },
     machineReadable: { openapi: `${BASE_URL}/openapi.json`, mcp: `${BASE_URL}/mcp` },
-    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR.",
+    attribution: "Data (c) OpenStreetMap contributors, ODbL 1.0. Geocoding and routing by LocationIQ.com. Energy data from EIA. Weather forecasts from MET Norway (CC BY 4.0). Weather alerts, tide and flood-stage data from NOAA. Earthquake and streamflow data from USGS. Wildfire incident data from the National Interagency Fire Center (WFIGS). Exchange rates from ECB. Air quality from EPA AirNow. Asteroid data from NASA JPL. Space weather data from NOAA Space Weather Prediction Center (SWPC). Chain data from Base public RPC. National debt data from U.S. Treasury Fiscal Data. Demographic data from U.S. Census Bureau. Filing search data from U.S. SEC EDGAR. Sentiment model finbert-minilm-sentiment by Nagizaaz Shaik (MIT License), served from huggingface.co/looky/finbert-minilm-sentiment.",
   };
 }
 
@@ -3421,6 +3469,76 @@ async function secFilingsSearchLogic(args) {
 }
 app.get("/sec/filings-search", (req, res) => runHandler(res, () => secFilingsSearchLogic(req.query)));
 
+// ---- /sentiment: financial text sentiment from a model run on this server ----
+// MiniLM fine-tuned for financial sentiment (33M parameters, 34 MB as int8
+// ONNX), run with Transformers.js. Chosen 2026-11-25 over three alternatives,
+// measured with Transformers.js 4.3.2 on one CPU core:
+//   - 87% on 2,388 finance tweets (zeroshot/twitter-financial-news-sentiment,
+//     validation split; the model trained on that set's training split)
+//   - 75% on 933 news headlines no candidate had seen (SEntFiN), tied with a
+//     model twice its size
+//   - ~4 ms per call, ~150 MB added to RSS (library ~55 MB + model ~100 MB)
+// Known weaknesses from the same tests: top scores are modest (often 0.5-0.7,
+// which is why all three are returned), and plain non-financial complaints can
+// come back neutral.
+//
+// The files are downloaded and checksummed during the build
+// (scripts/fetch-sentiment-model.js) and read from ./models here; remote loading
+// is switched off, so this never touches the network at runtime.
+//
+// Loaded in the background at boot and deliberately NOT awaited before
+// app.listen(), the same rule as the MCP setup below: a missing or broken model
+// must only make /sentiment answer 503 (not billed), never delay or prevent the
+// other paid routes from serving.
+const SENTIMENT_MAX_CHARS = 1000;
+const sentimentModel = (async () => {
+  const { pipeline, env } = await import("@huggingface/transformers");
+  env.localModelPath = MODELS_DIR;
+  env.allowRemoteModels = false;
+  const classify = await pipeline("text-classification", SENTIMENT_MODEL_ID, {
+    dtype: "q8",
+    // Starter is half a CPU, but the container can see all of the host's cores.
+    // Left alone, ONNX Runtime starts a thread per visible core and they fight
+    // over the half-CPU quota, which is slower than one thread.
+    session_options: { intraOpNumThreads: 1, interOpNumThreads: 1 },
+  });
+  await classify("warm up"); // the first run allocates; keep that off a buyer's request
+  return classify;
+})();
+sentimentModel.then(
+  () => console.log(`   Sentiment model ready: ${SENTIMENT_MODEL_ID}@${SENTIMENT_MODEL_REVISION.slice(0, 7)}`),
+  (err) => console.error("Sentiment model failed to load, /sentiment will answer 503:", err.message),
+);
+
+const round4 = (n) => Math.round(n * 10_000) / 10_000;
+
+async function sentimentLogic({ text }) {
+  if (text === undefined || text === "") throw new HttpError(400, "Missing required query param: text");
+  // Express turns ?text=a&text=b into an array.
+  if (typeof text !== "string") throw new HttpError(400, "Give text once, as a single string");
+  const input = text.trim();
+  if (!input) throw new HttpError(400, "text is empty");
+  if (input.length > SENTIMENT_MAX_CHARS) {
+    throw new HttpError(400, `text is ${input.length} characters; the limit is ${SENTIMENT_MAX_CHARS}`);
+  }
+  let classify;
+  try {
+    classify = await sentimentModel;
+  } catch {
+    throw new HttpError(503, "Sentiment model unavailable");
+  }
+  const results = await classify(input, { top_k: 3 });
+  const scores = Object.fromEntries(results.map(({ label, score }) => [label, round4(score)]));
+  return {
+    text: input,
+    label: results[0].label,
+    scores: { positive: scores.positive, neutral: scores.neutral, negative: scores.negative },
+    model: SENTIMENT_MODEL_ID,
+    modelRevision: SENTIMENT_MODEL_REVISION.slice(0, 7),
+  };
+}
+app.get("/sentiment", (req, res) => runHandler(res, () => sentimentLogic(req.query)));
+
 // ---- MCP endpoint (POST /mcp) — the same 18 tools, payable in-band via x402 ----
 // Stateless Streamable HTTP: initialize and tools/list are free; each tools/call is
 // wrapped by @x402/mcp — unpaid calls get the payment requirements as a structured
@@ -3449,6 +3567,7 @@ const MCP_TOOL_DEFS = [
   { path: "/payments/history", logic: paymentHistoryLogic },
   { path: "/sec/filings-search", logic: secFilingsSearchLogic },
   { path: "/census/demographics", logic: censusDemographicsLogic },
+  { path: "/sentiment", logic: sentimentLogic },
 ];
 
 const toSnakeCase = (s) => s.replace(/([A-Z])/g, "_$1").toLowerCase();

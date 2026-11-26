@@ -79,6 +79,7 @@ const ROUTES = [
   "/payments/history?hours=24",
   "/census/demographics?zip=10001",
   "/sec/filings-search?q=chip%20shortage&forms=10-K",
+  "/sentiment?text=Bitcoin%20surges%20past%20%24100k%20as%20ETF%20inflows%20hit%20a%20record%20high",
 ];
 
 const results = [];

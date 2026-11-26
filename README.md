@@ -31,6 +31,7 @@ Agents pay per call in USDC on Base, no accounts, no API keys on their end, no s
 | `GET /payments/history?hours=24&address=...` | This seller's own recent USDC settlement history on Base (self-referential, max 72h window) | $0.001 |
 | `GET /census/demographics?zip=...` | US Census ACS 5-Year population, median income, median age, and housing units by ZIP code (Census Bureau) | $0.001 |
 | `GET /sec/filings-search?q=...&forms=10-K` | Full-text search across all SEC EDGAR filings since 2001, by keyword/company/topic (SEC EDGAR) | $0.05 |
+| `GET /sentiment?text=...` | Financial sentiment of a headline, tweet or market post: negative, neutral or positive, with all three scores. English, up to 1,000 characters (model run on this server; see "The /sentiment model") | $0.002 |
 
 Every endpoint is also an MCP tool at `POST /mcp`, at the same price as its HTTP route.
 The prices above are set by the `PRICE_*` constants in `server.js`; the root page, the
@@ -258,6 +259,43 @@ redistribution restrictions. Lessons learned building this:
   once the true match count exceeds ~10,000. Filing URL is
   `https://www.sec.gov/Archives/edgar/data/{CIK-no-leading-zeros}/{accession-with-dashes}-index.htm`,
   confirmed against SEC's own webmaster FAQ and a live 200 fetch.
+
+## The /sentiment model
+
+`/sentiment` is the one route with no upstream API: it runs a small model on this server.
+
+- **Which model:** `finbert-minilm-sentiment` by Nagizaaz Shaik (MiniLM, 33M parameters,
+  fine-tuned for financial sentiment), MIT License. It is served from the owner's own copy,
+  [`looky/finbert-minilm-sentiment`](https://huggingface.co/looky/finbert-minilm-sentiment),
+  duplicated on 2026-11-25 from `9mark9/finbert-minilm-sentiment` so the build does not
+  depend on a third party keeping their repo up. `sentiment-model.js` pins the commit and
+  the SHA-256 of every file; it is the only place to edit to change models.
+- **How it gets onto the server:** `npm install` (Render's build command) runs
+  `scripts/fetch-sentiment-model.js` as `postinstall`. It downloads the 35 MB of files
+  into `models/` (gitignored), checks every hash, and fails the build if it can't, so
+  Render keeps the previous deploy live instead of shipping a broken route. The server
+  loads the files from disk at boot with remote loading switched off, so it never calls
+  Hugging Face at runtime. If Hugging Face is down and something else has to ship, set
+  `SKIP_SENTIMENT_MODEL=1` in Render's environment: the build passes and `/sentiment`
+  answers 503 (not billed) until a build with the model goes out.
+- **Boot and failure behavior:** the model loads in the background, like the MCP setup,
+  so it can never delay or block the other routes. If it fails to load, `/sentiment`
+  answers 503 and the other routes are unaffected.
+- **What it costs to run:** about 150 MB of extra memory (Transformers.js ~55 MB, model
+  ~100 MB) and ~4 ms of CPU per call on one core. Measured 2026-11-25 on a local copy of
+  the server: 246-275 MB in total, inside Starter's 512 MB. `npm install` pulls ~745 MB
+  of ONNX Runtime binaries, so the first build after this change is slower.
+- **How good it is (tested 2026-11-25 against three alternatives):** 87% on 2,388 finance
+  tweets (`zeroshot/twitter-financial-news-sentiment` validation; the model was trained on
+  that set's training split, so this flatters it) and 75% on 933 news headlines no model
+  had seen (SEntFiN), tied with a model twice its size. Top scores are often only 0.5-0.7,
+  which is why all three are returned. English only: other languages tend to come back
+  neutral.
+- **License caveat:** the model is MIT, but its training data includes Financial
+  PhraseBank, which is licensed CC BY-NC-SA 3.0 (non-commercial). Whether that restriction
+  carries over to a trained model is legally unsettled. Many financial sentiment models
+  share this, since PhraseBank is the standard training set. The most downloaded one,
+  ProsusAI/finbert, is licensed non-commercial outright, which is why it was not used.
 
 ## Extending this
 
