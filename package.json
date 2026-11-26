@@ -6,10 +6,12 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "postinstall": "node scripts/fetch-sentiment-model.js"
   },
   "dependencies": {
     "@coinbase/x402": "^2.1.0",
+    "@huggingface/transformers": "^4.3.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.18.0",
