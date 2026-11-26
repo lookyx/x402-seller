@@ -147,6 +147,20 @@ node buyer.js
 
 Look for `Payment status: settled` and a transaction hash to confirm it worked.
 
+To pay for one route without editing anything, use `buyer-one.js`. It takes the route as
+an argument (the default is the `/sentiment` example, $0.002), uses the same self-test
+User-Agent as `buyer-all.js`, and prints the response, the settlement status with a Basescan
+link, the header checks, and the reason when a payment is refused (low balance, amount too
+low), which otherwise only shows up in the encoded `payment-required` header:
+
+```bash
+node buyer-one.js
+node buyer-one.js "/currency/rate?from=USD&to=JPY"
+```
+
+`buyer-all.js` pays every route once (about $0.30 at current prices); use it after a
+reprice, or to sweep everything.
+
 ## Data sourcing — what's safe to add, what isn't
 
 Before adding a new endpoint, check the data source's terms of service for resale/
@@ -306,7 +320,8 @@ The pattern for adding a new paid endpoint:
 3. Add the route to the `paymentMiddleware` config with `declareDiscoveryExtension()`
    metadata, plus the actual handler
 4. Commit, push, let it auto-deploy
-5. Test with `buyer.js` against a real payment before considering it done
+5. Test with `buyer-one.js` against a real payment before considering it done, and add
+   the route to `buyer-all.js`
 
 ## Price floor
 
