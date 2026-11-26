@@ -1093,9 +1093,12 @@ const PAYMENT_ROUTES = {
           }),
         },
       },
+      // 392 bytes, 444 with the MCP price sentence: under the MCP cap (450) and
+      // the facilitator's known-good 459 (gotcha #12). The last sentence points
+      // agents that want a company's figures at /sec/financials.
       "GET /sec/filings-search": {
         accepts: [{ scheme: "exact", price: PRICE_SEC_FILINGS_SEARCH, network: NETWORK, payTo: PAY_TO }],
-        description: "Full-text search across every SEC EDGAR filing since 2001 (10-K, 10-Q, 8-K, and more) by keyword, company name, or topic. Returns matching filings: company name, ticker (if available), CIK, form type, filing date, accession number, SIC code, and a direct link to the filing. Optional forms filters by comma-separated form type(s); startdt/enddt filter by filing date (YYYY-MM-DD).",
+        description: "Full-text search across every SEC EDGAR filing since 2001 (10-K, 10-Q, 8-K, and more) by keyword, company name, or topic. Returns matching filings: company name, ticker (if available), CIK, form type, filing date, accession number, SIC code, and a direct link to the filing. Filter with forms (e.g. 10-K,8-K) and startdt/enddt. For a company's reported figures by ticker, use /sec/financials.",
         mimeType: "application/json",
         extensions: {
           ...declareDiscoveryExtension({
